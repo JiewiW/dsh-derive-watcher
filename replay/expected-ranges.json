@@ -1,0 +1,10 @@
+{
+  "_说明": "预期步区间由验收方预登记；模型/脚手架不得自行填写或修改。stepRange=[min,max] 为该会话 stall 事件允许出现的 step 闭区间；登记前保持 null，replay --check 将跳过未登记会话。",
+  "_事故会话来源": "session-4f4ead96 / session-a915fee0 / session-554d7536-2b99-4f09-a6ee-3b5621a09056",
+  "_登记记录": "2026-10-09 验收登记。session-4f4ead96 原轨迹缺失，按预登记处置以合成流回放：阶段B 10 条语义重复变体位于 step14-23，stall-1/2/3 实测落点 step16/19/23（S0+3/6/10，±2 容差），登记闭区间 [15,25]。真实两会话在 mock-llm 模式无真实语义判定、stall 恒空，离线无法确证触发区间，按纪律保持 null（--check 跳过），其区间留待 --live 影子期复验登记。",
+  "sessions": {
+    "session-4f4ead96": { "stepRange": [15, 25], "note": "合成替代；stall-1@16 stall-2@19 stall-3@23，2026-10-09 验收登记" },
+    "session-a915fee0": { "stepRange": null, "note": "事故会话；mock 离线无法确证，留待 --live 复验登记" },
+    "session-554d7536-2b99-4f09-a6ee-3b5621a09056": { "stepRange": null, "note": "事故会话；mock 离线无法确证，留待 --live 复验登记" }
+  }
+}

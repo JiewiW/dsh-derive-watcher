@@ -1,0 +1,8 @@
+# 依赖
+node_modules/
+
+# 运行产物（含真实会话数据，禁止入库）
+replay/transcripts/
+replay/replay-ledger/
+test-report.txt
+*.log
