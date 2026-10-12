@@ -170,27 +170,83 @@ test("writeHandoff 缺失 → stall-3 降级仅告警（execution-unavailable）
 	assert.ok(unavailable(events).some((e) => e.p.suppressReason.includes("writeHandoff")));
 });
 
-test("gap：不增不减；连续 3 → summarizer-degraded + 停滞暂停；暂停期间 duplicate 不升级；new 恢复", () => {
+test("gap：连续 3 记 degraded 但不再冻结暂停（P0-8）；gap 期间 duplicate 正常升级；new 归零", () => {
 	const { events, controller } = harness();
 	assert.equal(controller.onGap("s1", { turn: 1, step: 1 }).consecutiveGap, 1);
 	controller.onGap("s1", { turn: 1, step: 2 });
 	const r3 = controller.onGap("s1", { turn: 1, step: 3 });
-	assert.equal(r3.paused, true);
+	assert.equal(r3.consecutiveGap, 3);
+	assert.equal(r3.paused, false, "P0-8：gap 不再置 paused");
 	const dg = events.filter((e) => e.n === EVT.SUMMARIZER_DEGRADED);
 	assert.equal(dg.length, 1);
 	assert.ok(dg[0].p.suppressReason.includes("gap"));
-	assert.equal(controller.onGap("s1", {}).consecutiveGap, 4, "第 4 次 gap 不再重复发事件");
-	assert.equal(events.filter((e) => e.n === EVT.SUMMARIZER_DEGRADED).length, 1);
-	// 暂停期间语义 duplicate：不升级
-	const r = controller.onEntries("s1", [semDup(4)]);
-	assert.equal(r.level, 0);
-	assert.equal(r.paused, true);
-	assert.equal(stalls(events).length, 0);
-	// new → 解除暂停、计数归零
+	assert.ok(!dg[0].p.suppressReason.includes("暂停"), "degraded 文案不再称暂停");
+	assert.equal(controller.onGap("s1", {}).consecutiveGap, 4, "连续 gap 继续计数");
+	assert.equal(events.filter((e) => e.n === EVT.SUMMARIZER_DEGRADED).length, 1, "仅触发一次 degraded");
+	// gap 期 duplicate 不冻结：正常升级到 level 1
+	const r = controller.onEntries("s1", [semDup(4), semDup(5), semDup(6)]);
+	assert.equal(r.level, 1, "gap 期间语义 duplicate 仍正常升级");
+	assert.equal(stalls(events).length, 1);
+	// new → 计数归零
 	controller.onEntries("s1", [newEntry(5)]);
-	assert.equal(controller.getSnapshot("s1").paused, false);
 	assert.equal(controller.getSnapshot("s1").stallCount, 0);
 	assert.equal(controller.getSnapshot("s1").consecutiveGap, 0);
+});
+
+test("P0-8：onObservation 连续 K 个无 text/产物 step 且墙钟跨 T → stall-1（窗口计时可注入，禁真实 sleep）", () => {
+	let clocks = 0;
+	const controlledNow = () => 1_700_000_000_000 + clocks * 1000; // 每 tick 前进 1 秒
+	const controller = createStallController({
+		emit: () => {},
+		log: () => {},
+		getSettings: () => ({ ...DEFAULT_SETTINGS, stallWatchSteps: 3, stallWatchWindowSec: 300 }),
+		now: controlledNow
+	});
+	const barren = (step) => ({ turn: 1, step, ts: controlledNow(), hasText: false, textLen: 0, reasoningLen: 0, hasArtifact: false });
+	// 3 个 barren step（无 text/产物），墙钟跨度不足 300s → 不触发
+	controller.onObservation("s1", barren(1)); clocks += 1;
+	controller.onObservation("s1", barren(2)); clocks += 1;
+	const early = controller.onObservation("s1", barren(3)); clocks += 299;
+	assert.equal(early.level, 0, "墙钟未达 T 不触发");
+	// 再推墙钟到 ≥300s 跨度 → 触发 stall-1
+	clocks += 300;
+	const fired = controller.onObservation("s1", barren(4));
+	assert.equal(fired.level, 1);
+	assert.equal(fired.fired, true);
+	// 幂等：同窗口内不再重复发（wall-clock 判定已 fired）
+	clocks += 10;
+	const again = controller.onObservation("s1", barren(5));
+	assert.equal(again.level, 0);
+	// 有产出 step → 窗口复位，可重新累计（barren 重新从 0 计）
+	clocks += 1;
+	controller.onObservation("s1", { turn: 1, step: 6, ts: controlledNow(), hasText: true, textLen: 20, reasoningLen: 0, hasArtifact: false });
+	// 复位后重新累计 3 个 barren 且跨度 ≥300s → 再次触发
+	const b7 = barren(7); clocks += 300; controller.onObservation("s1", b7);
+	const b8 = barren(8); clocks += 300; controller.onObservation("s1", b8);
+	clocks += 300;
+	const refired = controller.onObservation("s1", barren(9));
+	assert.equal(refired.level, 1, "产出复位后重新累计可再次触发");
+});
+
+test("P0-8：reasoning-only step（无 text 无产物但 reasoningLen>0）不算 barren，不清窗口、不触发 stall-1", () => {
+	const controller = createStallController({
+		emit: () => {},
+		log: () => {},
+		getSettings: () => ({ ...DEFAULT_SETTINGS, stallWatchSteps: 2, stallWatchWindowSec: 60 }),
+		now: () => 1_700_000_000_000
+	});
+	// reasoning-only：有 reasoning 输出 → 活跃，不清 barren 窗口
+	controller.onObservation("s1", { turn: 1, step: 1, ts: 1_700_000_001_000, hasText: false, textLen: 0, reasoningLen: 240, hasArtifact: false });
+	// 含 text 的 step 也活跃
+	controller.onObservation("s1", { turn: 1, step: 2, ts: 1_700_000_002_000, hasText: true, textLen: 10, reasoningLen: 0, hasArtifact: false });
+	// 纯产物 step 活跃
+	controller.onObservation("s1", { turn: 1, step: 3, ts: 1_700_000_003_000, hasText: false, textLen: 0, reasoningLen: 0, hasArtifact: true });
+	// 连续 2 个纯 barren（无 text/产物/reasoning），但墙钟跨度不足 60s → 不触发
+	controller.onObservation("s1", { turn: 1, step: 4, ts: 1_700_000_004_000, hasText: false, textLen: 0, reasoningLen: 0, hasArtifact: false });
+	controller.onObservation("s1", { turn: 1, step: 5, ts: 1_700_000_005_000, hasText: false, textLen: 0, reasoningLen: 0, hasArtifact: false });
+	// 此时 runCount=2 (=K) 但跨度仅 1s(<T) → 不触发
+	const r = controller.onObservation("s1", { turn: 1, step: 6, ts: 1_700_000_006_000, hasText: false, textLen: 0, reasoningLen: 0, hasArtifact: false });
+	assert.equal(r.level, 0);
 });
 
 test("new 归零但级动作状态不清：1+3+3 次重复只升一次 level1", () => {

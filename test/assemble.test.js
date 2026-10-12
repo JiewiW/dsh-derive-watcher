@@ -43,10 +43,11 @@ const fakeLlm = {
 	}
 };
 
-function makeCtx() {
+function makeCtx(extraServices) {
 	const handlers = new Map();
 	const routes = [];
 	const services = new Map([["llm", fakeLlm]]);
+	if (extraServices) { for (const [k, v] of Object.entries(extraServices)) services.set(k, v); }
 	return {
 		handlers, routes,
 		get: (name) => services.get(name),
@@ -59,7 +60,7 @@ function makeCtx() {
 }
 
 const ctx = makeCtx();
-apply(ctx, undefined); // apply 返回卸载函数，ctx 即 makeCtx() 返回的宿主句柄
+const dispose = apply(ctx, undefined); // apply 返回卸载函数 + 测试钩子（P1-12）
 
 function makeSession(id, appended = []) {
 	return {
@@ -229,6 +230,29 @@ test("session/event：真人 user/message 不抛错（停滞状态归零路径�
 	onEvent(session, { type: "user/message", data: { turn: 3, step: 0, message: { source: { kind: "plugin:other", plugin: "other" }, content: "插件消息不算真人" } } });
 });
 
+test("P1-12：turn/end 后 TTL 过期删除会话与心跳（模拟时钟，禁 sleep）", () => {
+	const [onEvent] = ctx.handlers.get("session/event");
+	const appended = [];
+	const session = makeSession("test-ttl-s1", appended);
+	const t0 = Date.now();
+	for (let i = 1; i <= 5; i++) {
+		onEvent(session, { type: "assistant/message", data: { turn: 1, step: i, message: { id: `am-ttl-${i}`, source: { kind: "model" }, content: [{ type: "text", text: "活跃文本" }] } } });
+	}
+	onEvent(session, { type: "turn/end", data: { turn: 1, reason: "turn-complete" } });
+	assert.ok(dispose.getDebugState().sessionCount >= 1, "session 已登记");
+	assert.ok(dispose.getDebugState().activityCount >= 1, "活跃度已登记");
+	const beatsBefore = dispose.getDebugState().beatCount;
+	assert.ok(beatsBefore >= 1, "存在心跳计数");
+	// 时钟推进：从当前真实时刻起超过 TTL（测试默认 sessionTtlMinutes=10）并留余量
+	dispose.pruneStaleSessions(Date.now() + 10 * 60_000 + 5000);
+	assert.equal(dispose.getDebugState().sessionCount, 0, "TTL 过期后 sessionById 已删");
+	assert.equal(dispose.getDebugState().activityCount, 0, "TTL 过期后活跃度已删");
+	assert.equal(dispose.getDebugState().beatCount, 0, "TTL 过期后心跳已删（不再 append）");
+	// 删除后再触发事件会重新登记 → 心跳重新开始（会话复活语义）
+	onEvent(session, { type: "assistant/message", data: { turn: 2, step: 1, message: { id: "am-ttl-live", source: { kind: "model" }, content: [{ type: "text", text: "复活文本" }] } } });
+	assert.ok(dispose.getDebugState().sessionCount >= 1, "新事件重新登记 session");
+});
+
 test("agent/pre-step：enableInjection=true 时注入组装文本（来源 plugin:dsh-derive-watcher）", async () => {
 	// 直接经 store 造 3 条 entry（独立 sid，不依赖前面用例的异步时序）
 	const sid = "test-assemble-s3";
@@ -262,6 +286,24 @@ test("agent/pre-step：空账本会话 → 透传不注入（无内容可注入�
 	assert.equal(decision.messages.length, 1, "无账本内容时保持原样");
 });
 
+test("P2-21②：enableInjection=false 封住投递通道（含警示，不注入任何插件文本）", async () => {
+	// 先用 POST 切到 enableInjection=false（settings 经内存 store 生效）
+	let res = fakeRes();
+	await ctx.routes[0].handler(postReq({ settings: { enableInjection: false } }), res);
+	assert.equal(res.status, 200);
+	// sid 已有账本 entry，正常开启注入时会注入；关闭后应原样透传
+	const [onPreStep] = ctx.handlers.get("agent/pre-step");
+	const payload = { agent: { session: { id: "test-assemble-s3" } }, turn: 3, step: 1, messages: [] };
+	const next = async () => ({ kind: "enter", messages: [{ role: "user", content: "existing" }] });
+	const decision = await onPreStep(payload, next);
+	assert.equal(decision.messages.length, 1, "enableInjection=false 时不追加任何插件文本（含警示）");
+	assert.equal(decision.messages[0].content, "existing", "原样透传");
+	// 还原 enableInjection=true，避免影响后续用例
+	res = fakeRes();
+	await ctx.routes[0].handler(postReq({ settings: { enableInjection: true } }), res);
+	assert.equal(res.status, 200);
+});
+
 test("agent/pre-step：decision.kind=reject 时不追加注入", async () => {
 	const [onPreStep] = ctx.handlers.get("agent/pre-step");
 	const payload = { agent: { session: { id: "test-assemble-s3" } }, turn: 2, step: 2, messages: [] };
@@ -269,4 +311,31 @@ test("agent/pre-step：decision.kind=reject 时不追加注入", async () => {
 	const decision = await onPreStep(payload, next);
 	assert.equal(decision.kind, "reject");
 	assert.equal(decision.messages, undefined);
+});
+
+test("P1-13：会话首事件触发一次性重启补扫（按观察水位，幂等）", async () => {
+	const sid = "test-backfill-s1";
+	// 预置观察水位 lastStepSeq=1：补扫应跳过 step≤1 的事件，只补 step2/3
+	const store = createJourneyStore({ root: tempRoot, emit: () => {}, log: () => {} });
+	store.saveObservationWatermark(sid, { lastStepSeq: 1 });
+	const events = [
+		{ type: "assistant/message", data: { turn: 1, step: 1, message: { id: "bf-1", source: { kind: "model" }, content: [{ type: "reasoning", text: "思考1" }, { type: "text", text: "结论1" }] } } },
+		{ type: "assistant/message", data: { turn: 1, step: 2, message: { id: "bf-2", source: { kind: "model" }, content: [{ type: "reasoning", text: "思考2" }] } } },
+		{ type: "assistant/message", data: { turn: 1, step: 3, message: { id: "bf-3", source: { kind: "model" }, content: [{ type: "reasoning", text: "思考3" }, { type: "text", text: "结论3" }] } } },
+		{ type: "assistant/message", data: { turn: 1, step: 4, message: { id: "bf-4", source: { kind: "model" }, content: [{ type: "text", text: "" }] } } }
+	];
+	const ctx2 = makeCtx({ sessionQuery: { listEvents: () => events } });
+	const dispose2 = apply(ctx2, undefined);
+	const [onEvent2] = ctx2.handlers.get("session/event");
+	// 触发首个事件（turn/end 也计入活跃度）→ 应触发一次性补扫
+	onEvent2({ id: sid, append: () => true }, { type: "turn/end", data: { turn: 1, reason: "done" } });
+	// 观察账本补写 step2/3（step1 被水位跳过；step4 空文本不入观察）；结论通道 step2/3/4 为 observation
+	const obs = store.readObservations(sid);
+	const obsSteps = obs.map((o) => o.step).sort((a, b) => a - b);
+	assert.deepEqual(obsSteps, [2, 3], "按观察水位补扫只补 step>1 的观察，空文本不入");
+	// 断言补扫只生效一次：再次触发事件不重复补写（水位已推进 → readObservations 不再增长）
+	const before2 = obs.length;
+	onEvent2({ id: sid, append: () => true }, { type: "turn/end", data: { turn: 2, reason: "done" } });
+	assert.equal(store.readObservations(sid).length, before2, "补扫幂等：二次触发不重复");
+	dispose2();
 });

@@ -12,7 +12,7 @@ import {
 } from "../lib/settings.js";
 
 test("DEFAULT_SETTINGS：18 键全量与首发态", () => {
-	assert.equal(Object.keys(DEFAULT_SETTINGS).length, 18);
+	assert.equal(Object.keys(DEFAULT_SETTINGS).length, 22);
 	assert.equal(DEFAULT_SETTINGS.enableJourney, true);
 	assert.equal(DEFAULT_SETTINGS.enableInjection, false);
 	assert.equal(DEFAULT_SETTINGS.enableStall3Reject, false);
@@ -31,7 +31,7 @@ test("DEFAULT_SETTINGS：18 键全量与首发态", () => {
 });
 
 test("SETTINGS_SCHEMA 覆盖全部键（GET 返回 schema 的内容保证）", () => {
-	assert.equal(SETTINGS_SCHEMA.length, 18);
+	assert.equal(SETTINGS_SCHEMA.length, 22);
 	for (const key of Object.keys(DEFAULT_SETTINGS)) {
 		assert.ok(SETTINGS_SCHEMA.some((c) => c.key === key), `schema 缺键 ${key}`);
 	}

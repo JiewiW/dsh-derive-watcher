@@ -48,6 +48,21 @@ function blocksToText(content) {
 		.join("\n");
 }
 
+// P0-2：reasoning 独立观察通道（只吃 reasoning 块文本）
+function blocksToReasoning(content) {
+	if (!Array.isArray(content)) return "";
+	return content
+		.filter((b) => b && b.type === "reasoning" && typeof b.text === "string")
+		.map((b) => b.text)
+		.join("\n");
+}
+
+// P0-8：产物判据（tool-call / image / file 块视为产出）
+function contentHasArtifact(content) {
+	if (!Array.isArray(content)) return false;
+	return content.some((b) => b && (b.type === "tool-call" || b.type === "image" || b.type === "file"));
+}
+
 /** 期望步区间（验收方预登记于 expected-ranges.json；本脚手架只读取校验，不填写不修改）。 */
 function loadExpectedRanges() {
 	const p = join(HERE, "expected-ranges.json");
@@ -164,17 +179,36 @@ async function replayOne(sessionId) {
 	});
 
 	let enqueued = 0;
+	let observations = 0;
+	let watchStalls = 0;
+	let clock = 0; // 模拟墙钟（P0-8 回放：逐步推进，禁用真实 sleep）
 	for (const line of lines) {
 		let ev;
 		try { ev = JSON.parse(line); } catch { continue; }
 		if (ev?.type === "assistant/message") {
-			const text = blocksToText(ev.data?.message?.content);
-			if (!text.trim()) continue;
+			const content = ev.data?.message?.content;
+			const text = blocksToText(content);
+			const reasoningLen = blocksToReasoning(content).trim().length;
+			const hasArtifact = contentHasArtifact(content);
+			const hasText = text.trim().length > 0;
+			const step = ev.data?.step ?? ev.data?.message?.step ?? null;
+			clock += 1000; // 每个 step 推进 1s 模拟墙钟
+			// P0-8：轻量观察事件喂 stall（reasoning 有量即活跃，不误判停滞）
+			try { stall.onObservation(sessionId, { turn: ev.data?.turn ?? ev.data?.message?.turn ?? null, step, ts: clock, hasText, textLen: text.length, reasoningLen, hasArtifact }); } catch { /* 忽略 */ }
+			// P0-2：reasoning 有量/有产物/有 text 的 step 均落观察（reasoning-only 也记，kind 独立不污染结论）
+			if ((hasText || reasoningLen > 0 || hasArtifact) && Number.isFinite(step)) {
+				try {
+					store.appendObservation(sessionId, { turn: ev.data?.turn ?? ev.data?.message?.turn ?? null, step, ts: new Date(clock).toISOString(), hasText, textLen: text.length, reasoningLen, hasArtifact });
+					store.saveObservationWatermark(sessionId, { lastStepSeq: step });
+					observations++;
+				} catch { /* 忽略 */ }
+			}
+			if (!hasText) continue;
 			const messageId = ev.data?.message?.id ?? `am-${enqueued + 1}`;
 			summarizer.enqueue(sessionId, {
 				messageId,
 				turn: ev.data?.turn ?? ev.data?.message?.turn ?? null,
-				step: ev.data?.step ?? ev.data?.message?.step ?? null,
+				step,
 				text
 			});
 			enqueued++;
@@ -191,6 +225,7 @@ async function replayOne(sessionId) {
 	const allLines = store.readAllLines(sessionId);
 	const gaps = allLines.filter((l) => l?.type === "gap").length;
 	const wm = store.loadWatermark(sessionId);
+	const obsWm = store.loadObservationWatermark ? store.loadObservationWatermark(sessionId) : null;
 	const count = (name) => events.filter((e) => e.name === name).length;
 	const stalls = events.filter((e) => e.name === "semantic-watcher/stall");
 	const result = {
@@ -199,17 +234,21 @@ async function replayOne(sessionId) {
 		transcriptLines: lines.length,
 		enqueued,
 		entries: entries.length,
+		observations,
+		reasoningObservations: store.readObservations ? store.readObservations(sessionId).filter((o) => o && o.kind === "reasoning-observation" && !o.hasText && o.reasoningLen > 0).length : 0,
 		duplicate: entries.filter((e) => e.novelty === "duplicate" && e.semantic_duplicate === false).length,
 		semanticDuplicate: entries.filter((e) => e.semantic_duplicate === true).length,
 		lexicalRepeat: count("semantic-watcher/lexical-repeat"),
 		stallEvents: stalls.length,
 		stallLevels: stalls.map((s) => s.payload.level),
 		maxStallLevel: stalls.reduce((mx, s) => Math.max(mx, s.payload.level ?? 0), 0),
+		watchStalls: count("semantic-watcher/stall"), // P0-8：stall-1 亦经 STALL 事件
 		gaps,
 		degraded: count("semantic-watcher/summarizer-degraded"),
 		corruption: count("semantic-watcher/store-corruption"),
 		unavailable: count("semantic-watcher/execution-unavailable"),
-		watermarkStepSeq: wm?.lastStepSeq ?? null
+		watermarkStepSeq: wm?.lastStepSeq ?? null,
+		observationWatermarkStepSeq: obsWm?.lastStepSeq ?? null
 	};
 
 	if (doCheck) {

@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
 	createSummarizer, QUEUE_CAP, DEFAULT_TIMEOUT_MS,
-	parseJsonObject, extractDraftEntries, buildDraftPrompt, makeLlmCall
+	parseJsonObject, extractDraftEntries, draftParse, buildDraftPrompt, makeLlmCall
 } from "../lib/summarizer.js";
 import { createJourneyStore } from "../lib/journey-store.js";
 import { EVT } from "../lib/events.js";
@@ -54,6 +54,58 @@ test("parseJsonObject / extractDraftEntries：围栏、噪声、非法条目丢�
 	assert.equal(drafts.length, 1);
 	assert.equal(drafts[0].summary, "有效");
 	assert.equal(buildDraftPrompt({ turn: 2, step: 3, text: "正文" }).includes("正文"), true);
+});
+
+test("draftParse：三态区分（合法空 / 有条目 / 解析失败）", () => {
+	// ok=true, drafts=[]
+	assert.deepEqual(draftParse('{"entries":[]}'), { ok: true, drafts: [] });
+	// ok=true, drafts 非空
+	const withOne = draftParse(draftJson("结论"));
+	assert.equal(withOne.ok, true);
+	assert.equal(withOne.drafts.length, 1);
+	// ok=false（畸形）
+	assert.deepEqual(draftParse("不是 JSON"), { ok: false, drafts: [] });
+	// 缺 entries 键视为畸形
+	assert.deepEqual(draftParse('{"foo":1}'), { ok: false, drafts: [] });
+});
+
+test("P0-3 合法空 entries：推进水位、不记 gap、不重试、无账本行", async () => {
+	let callCount = 0;
+	const h = harness(async () => { callCount += 1; return '{"entries":[]}'; });
+	try {
+		h.summarizer.enqueue("s1", { messageId: "m1", turn: 1, step: 1, text: "有内容但模型认为无可记" });
+		await awaitDrain(h, 0);
+		await settle();
+		// 不重试：仅 1 次草稿调用
+		assert.equal(callCount, 1);
+		// 不记 gap：账本最后一行不是 gap，无 degrade 事件
+		assert.equal(h.summarizer.stats().degraded, 0);
+		assert.equal(h.gaps.length, 0);
+		assert.ok(!h.events.some((e) => e.n === EVT.SUMMARIZER_DEGRADED));
+		// 无结论账本行
+		assert.equal(h.store.readEntries("s1").length, 0);
+		// 关键：合法空也推进总结水位（不卡同 step 补扫）
+		const wm = h.store.loadWatermark("s1");
+		assert.equal(wm.lastMessageId, "m1");
+		assert.equal(wm.lastStepSeq, 1);
+		assert.equal(h.summarized.length, 0, "合法空不应触发 onSummarized 落账回调");
+	} finally { h.cleanup(); }
+});
+
+test("P2-22 畸形括号一次修复：不重试直接成功", async () => {
+	let callCount = 0;
+	const h = harness(async () => {
+		callCount += 1;
+		// 缺右大括号的畸形 JSON
+		return '{"entries":[{"kind":"finding","summary":"括号修复后的结论"}]';
+	});
+	try {
+		h.summarizer.enqueue("s1", { messageId: "m1", turn: 1, step: 1, text: "内容" });
+		await awaitDrain(h, 1);
+		assert.equal(h.summarizer.stats().processed, 1);
+		assert.equal(h.store.readEntries("s1").length, 1);
+		assert.equal(h.store.readEntries("s1")[0].summary, "括号修复后的结论");
+	} finally { h.cleanup(); }
 });
 
 test("正常总结：落账 new + 水位推进 + onSummarized", async () => {
@@ -169,6 +221,21 @@ test("队列上限 8：溢出丢最旧 + gap + 事件；其余照常处理", asy
 	} finally { release?.(); h.cleanup(); }
 });
 
+test("P2-21①：messageId 缺失的入队其 evict 键与 add 键同构（无 null 残留 seen）", async () => {
+	let release;
+	const gate = new Promise((r) => { release = r; });
+	let seq = 0;
+	const h = harness(async () => { await gate; return draftJson(`同构唯一结论${++seq}`); });
+	try {
+		// step=1 立即进 in-flight（pump 同步启动），队列可容 8：第 10 条挤掉队首（step=2）。
+		// 全部无 messageId → 键退化为 turn/step。修复前 evict 键是 `${sid}/null`（残留 `${sid}/1/2`）；修复后同构可重新入队。
+		for (let i = 1; i <= 10; i++) h.summarizer.enqueue("s1", { turn: 1, step: i, text: `消息${i}` });
+		assert.equal(h.summarizer.stats().dropped, 1, "第 10 条入队挤掉队首的 turn/step=1/2");
+		const again = h.summarizer.enqueue("s1", { turn: 1, step: 2, text: "重新投递被挤掉的消息" });
+		assert.equal(again.queued, true, "被挤掉的 turn/step 键可重新入队（seen 已随 evict 清干净）");
+	} finally { release?.(); h.cleanup(); }
+});
+
 test("并发闸默认 1：两个任务串行", async () => {
 	let inFlight = 0, maxInFlight = 0, seq = 0;
 	const h = harness(async () => {
@@ -237,4 +304,76 @@ test("makeLlmCall：flash 钉定（provider/model 留空传 undefined）+ text �
 	assert.equal(captured.sessionId, "s1");
 	assert.equal(captured.purpose, "semantic-watcher/draft");
 	assert.equal(captured.signal instanceof AbortSignal, true);
+});
+
+test("P2-22 makeLlmCall：finish/usage 埋点 + onMeta 透出截断证据", async () => {
+	let metas = null;
+	let captured = null;
+	const fakeLlm = {
+		stream: (opts) => {
+			captured = opts;
+			return (async function* () {
+				yield { type: "text-delta", index: 0, text: "部分输出" };
+				yield { type: "usage", outputTokens: 512 };
+				yield { type: "finish", reason: { kind: "max-tokens" } };
+			})();
+		}
+	};
+	const c = makeLlmCall({ llm: fakeLlm, provider: "", model: "", source: null, onMeta: (m) => { metas = m; } });
+	const out = await c({ prompt: "p", sessionId: "s1" });
+	assert.equal(out, "部分输出");
+	assert.ok(metas, "onMeta 应在 finally 透出");
+	assert.equal(metas.finishKind, "max-tokens");
+	assert.equal(metas.outputTokens, 512);
+	assert.equal(metas.truncationSuspect, true);
+	assert.ok(Number.isFinite(metas.elapsedMs));
+	assert.equal(captured.responseFormat, undefined, "未声明 supportsJsonMode 时 jsonMode 不应硬加");
+});
+
+test("P2-22 makeLlmCall：jsonMode 在 supportsJsonMode=true 时透传 responseFormat", async () => {
+	let captured = null;
+	const fakeLlm = {
+		supportsJsonMode: () => true,
+		stream: (opts) => {
+			captured = opts;
+			return (async function* () { yield { type: "finish", reason: { kind: "stop" } }; })();
+		}
+	};
+	const c = makeLlmCall({ llm: fakeLlm, provider: "", model: "", source: null, jsonMode: true });
+	await c({ prompt: "p" });
+	assert.deepEqual(captured.responseFormat, { type: "json_object" });
+});
+
+test("P2-22 熔断：连续 3 次降级后冷却期内短路（不再打 LLM）", async () => {
+	let callLlmCount = 0;
+	let clock = 0;
+	const root = mkdtempSync(join(tmpdir(), "dsw-circ-"));
+	let sm;
+	try {
+		const events = [];
+		const store = createJourneyStore({ root, emit: (n, p) => events.push({ n, p }), log: () => {} });
+		sm = createSummarizer({
+			store, emit: (n, p) => events.push({ n, p }), log: () => {},
+			getSettings: () => ({ ...DEFAULT_SETTINGS }), callLlm: async () => { callLlmCount += 1; return "仍然不是 JSON"; },
+			now: () => clock
+		});
+		sm.enqueue("s1", { messageId: "m1", turn: 1, step: 1, text: "a" });
+		await settle(3);
+		sm.enqueue("s1", { messageId: "m2", turn: 1, step: 2, text: "b" });
+		await settle(3);
+		sm.enqueue("s1", { messageId: "m3", turn: 1, step: 3, text: "c" });
+		await settle(3);
+		assert.ok(callLlmCount >= 3, "前三次仍打 LLM（熔断前）");
+		const before = callLlmCount;
+		// 冷却期内短路：不再打 LLM，直接 degrade
+		sm.enqueue("s1", { messageId: "m4", turn: 1, step: 4, text: "d" });
+		await settle(3);
+		assert.equal(callLlmCount, before, "熔断冷却期内不应再打 LLM");
+		// 推进时钟越过冷却期 → 放行一次试探（试探失败仍会 draft+retry 各打一次 LLM）
+		clock += 60_001;
+		const beforeTrial = callLlmCount;
+		sm.enqueue("s1", { messageId: "m5", turn: 1, step: 5, text: "e" });
+		await settle(3);
+		assert.ok(callLlmCount > beforeTrial, "冷却期后应放行一次试探（重新打 LLM）");
+	} finally { rmSync(root, { recursive: true, force: true }); }
 });

@@ -10,13 +10,14 @@ DSH（DeepSeek Harness）插件：**语义监视者（L3）**。观察 agent 会
 
 ## 功能（P0–P3）
 
-- **语义旅程账本（journey-store）**：每个 assistant/message 总结为结构化条目（finding/decision/dead-end/hypothesis/plan/fact），JSONL + MD 双镜像落账；字面闭标签写前转写、读时还原（`escapeClosingTags`）；每条 append 做长度守恒校验（写入字节 == 序列化字节）且回读可 JSON.parse，失败发 `semantic-watcher/store-corruption` 并停止该条写入；watermark 水位记录每会话最后成功 messageId/stepSeq，支持重启补扫。
-- **flash 总结（summarizer）**：异步 worker 队列消费；并发闸默认 1（上限 2）、单次 30s 超时（独立 AbortController）、畸形 JSON 重试 1 次、队列上限 8 溢出丢最旧并记 gap；gap 不产出条目、不参与停滞判定。
+- **语义旅程账本（journey-store）**：每个 assistant/message 总结为结构化条目（finding/decision/dead-end/hypothesis/plan/fact），JSONL + MD 双镜像落账；字面闭标签写前转写、读时还原（`escapeClosingTags`）；每条 append 做长度守恒校验（写入字节 == 序列化字节）且回读可 JSON.parse，失败发 `semantic-watcher/store-corruption` 并停止该条写入；watermark 水位记录每会话最后成功 messageId/stepSeq，支持重启补扫。**P0-2 reasoning 观察通道**：reasoning 块（独立于 text）单独提取，走独立 `observation/<sid>.jsonl` 账本与 `observation` watermark，kind=`reasoning-observation`，绝不混入正式结论 entry——text 长期为空而 reasoning 有量时以 reasoning 流为准。
+- **flash 总结（summarizer）**：异步 worker 队列消费；并发闸默认 1（上限 2）、单次 30s 超时（独立 AbortController）、畸 形 JSON 重试 1 次、队列上限 8 溢出丢最旧并记 gap；gap 不产出条目。**P0-3 合法空分流**：解析成功 `{"entries":[]}` 计正常空结果（只推水位、不记 gap、不重试），仅解析失败才重试/记 gap。**P2-22 健壮性**：畸形括号一次配对修复（缺右括号等）、连续降级熔断短路冷却、degrade 原因分级（timeout/parse-error/empty-ok）、finish_reason/output_tokens/单次耗时埋点。
 - **新颖性判定（novelty）**：中文归一化后字符 3-gram MinHash 词法判定（Jaccard 阈 0.8）+ LLM schema 自检；embedding 余弦（阈 0.85）可选，模型无能力时自动回退 schema 自检。
 - **里程碑折叠（fold）**：账本条目超阈值（>recentN×3）或注入超预算时，最旧一批交 flash 蒸馏为里程碑，原文移入归档；**dead-end 全量保留零丢失**、open objectives 跨折叠保留；retention 定期清理过期归档并发事件。
 - **上下文注入（injection，默认关）**：pre-step 时组装 open objectives（置顶）+ 里程碑 + 最近 N 条结论注入下一轮上下文；排除最近 1–3 步；水位落后带 `latestSummarized:false` 不用陈旧条目冒充；token 预算内只做整条剔除/句界裁剪，禁止截断单条中间；组装后结构校验，失败发 `semantic-watcher/injection-skipped` 并放弃注入。
-- **三级语义停滞响应（stall）**：连续无新结论（duplicate 且无 new）计步 → stall-1（注入警示）/ stall-2（请求 L2 `denyToolCategory`，code=`semantic-stall-2`，TTL=stall3−stall2）/ stall-3（请求 L2 `rejectStep`，code=`semantic-stall` + 写交接账本与续跑种子）；纯词法重复只记账发 `lexical-repeat` 不升级，仅语义重复计入升级；真人消息归零所有状态；L2 不可用全部 fail-open 并发 `semantic-watcher/execution-unavailable`。
-- **worker 心跳**：每分钟或每 5 个事件发出，载荷含队列长度与水位 stepSeq。
+- **三级语义停滞响应（stall）**：连续无新结论（duplicate 且无 new）计步 → stall-1（注入警示）/ stall-2（请求 L2 `denyToolCategory`，code=`semantic-stall-2`，TTL=stall3−stall2）/ stall-3（请求 L2 `rejectStep`，code=`semantic-stall` + 写交接账本与续跑种子）；纯词法重复只记账发 `lexical-repeat` 不升级，仅语义重复计入升级；真人消息归零所有状态；L2 不可用全部 fail-open 并发 `semantic-watcher/execution-unavailable`。**P0-8 wall-clock 观察旁路**：每个 assistant step 喂轻量观察事件（hasText/textLen/reasoningLen/hasArtifact），连续 K=3 个无 text/产物 step 且墙钟跨度≥T=5min 报 stall-1（K/T 可配）；gap 期降级继续计数不再常驻 paused 冻结；观察水位与总结水位拆分；`source.plugin` 系统注入不算真人消息不清零。
+- **worker 心跳**：每分钟或每 5 个事件发出，载荷含队列长度与水位 stepSeq。**P1-12 生命周期**：心跳不再自刷 lastBeat（死会话回收分支可达）；turn/end 或最后事件后 TTL（默认 10 分钟）无新事件自动删除会话与心跳；心跳只对活跃会话 append、死会话不写盘；retention 清扫移出心跳定时器独立调度。
+- **重启补扫（P1-13）**：会话首事件触发 `backfillFromSessionMessages`，按观察水位/总结水位幂等补扫进程内队列丢失的消息，重启不永久漏账。
 
 ## 事件
 
@@ -30,18 +31,22 @@ DSH（DeepSeek Harness）插件：**语义监视者（L3）**。观察 agent 会
 
 ## 设置
 
-18 键六大组（旅程账本 / 总结 / 注入与折叠 / 新颖性 / 停滞阈值 / 存储），运行时经 `GET/POST /plugins/derive-watcher/settings` 读写，GET 返回完整 schema。关键默认值：
+22 键六大组（旅程账本 / 总结 / 注入与折叠 / 新颖性 / 停滞阈值 / 存储），运行时经 `GET/POST /plugins/derive-watcher/settings` 读写，GET 返回完整 schema。关键默认值：
 
 | 键 | 默认 | 说明 |
 | --- | --- | --- |
 | `enableJourney` | `true` | 旅程账本总开关 |
 | `enableInjection` | `false` | 注入总开关（**首发固定关**） |
 | `stall1Steps` / `stall2Steps` / `stall3Steps` | 3 / 6 / 10 | 停滞分级阈值（保存时校验严格递增，倒挂拒绝） |
+| `stallWatchSteps` | 3 | P0-8 观察旁路：连续无 text/产物 step 阈值 K |
+| `stallWatchWindowSec` | 300 | P0-8 观察旁路：墙钟跨度 T（秒） |
 | `enableStall2Deny` / `enableStall3Reject` | `false` / `false` | stall-2/3 的 L2 联动（**首发固定关**） |
 | `injectionTokenBudget` | 1200（800–1500） | 注入 token 预算 |
 | `recentN` | 8 | 最近结论窗口 |
 | `noveltyMode` | `schema-selfcheck` | 词法之外的语义判定模式（可 `embedding` / `both`） |
 | `retentionDays` | 30 | 归档保留天数 |
+| `ledgerRetentionDays` | 0 | P2-21③ 主账本保留天数（0 仅清归档不清主账本） |
+| `sessionTtlMinutes` | 10 | P1-12 会话 TTL（最后事件后 X 分钟无新事件删除会话与心跳） |
 | `escapeClosingTags` | `true` | 闭标签转写开关 |
 
 联动约束：`enableInjection` 要求 `enableJourney`；`enableStall2Deny`/`enableStall3Reject` 要求 `enableInjection`。
@@ -49,7 +54,7 @@ DSH（DeepSeek Harness）插件：**语义监视者（L3）**。观察 agent 会
 ## 测试
 
 ```powershell
-node --test test/
+node --test "test/*.test.js"
 ```
 
 覆盖：store 转写与长度守恒、MinHash 边界、schema 自检 mock 与畸形 JSON 重试、折叠链完整性、注入预算与句界裁剪、stall 全部口径（gap/背离/重置/阈值倒挂）、设置 clamp/联动/回退、L2 不可用降级等。

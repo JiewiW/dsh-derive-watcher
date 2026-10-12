@@ -4,11 +4,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import * as realFs from "node:fs";
-import { mkdtempSync, rmSync, existsSync, readFileSync, readdirSync, utimesSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, existsSync, readFileSync, readdirSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-	KINDS, escapeClosingTags, restoreClosingTags, hasTranscriptionMarker,
+	KINDS, OBSERVATION_KINDS, escapeClosingTags, restoreClosingTags, hasTranscriptionMarker,
 	createJourneyStore, backfillFromSessionMessages
 } from "../lib/journey-store.js";
 
@@ -180,6 +180,27 @@ test("retentionClean：按 mtime 清理过期归档", () => {
 	} finally { cleanup(); }
 });
 
+test("P2-21③ retentionCleanLedger：ledgerRetentionDays>0 清理过期的会话主账本/gap；0 不清理", () => {
+	const { store, cleanup } = freshStore();
+	try {
+		for (let i = 1; i <= 3; i++) store.appendEntry("s1", { turn: 1, step: i, sourceMessageId: `m${i}`, kind: "finding", summary: `结论${i}`, novelty: "new" });
+		store.appendGap("s1", { reason: "测试 gap", step: 4 });
+		const s1jsonl = join(store.paths.journeyDir, "s1.jsonl");
+		const s2jsonl = join(store.paths.journeyDir, "s2.jsonl");
+		writeFileSync(s2jsonl, JSON.stringify({ type: "gap", rrr: 1 }) + "\n");
+		// 0 = 不清理主账本
+		assert.equal(store.retentionCleanLedger(0).length, 0);
+		assert.ok(existsSync(s1jsonl));
+		// 把 s1.jsonl 置旧 → 清理；s2 仍新 → 保留
+		const old = new Date(Date.now() - 40 * 86400000);
+		utimesSync(s1jsonl, old, old);
+		const removed = store.retentionCleanLedger(30);
+		assert.ok(removed.includes("s1.jsonl"), `应清理 s1.jsonl，实际 ${JSON.stringify(removed)}`);
+		assert.ok(!removed.includes("s2.jsonl"), "新账本保留");
+		assert.ok(!existsSync(s1jsonl), "s1 主账本已删除");
+	} finally { cleanup(); }
+});
+
 test("nextEntryId 重启恢复：新实例从主账本+里程碑+归档取最大", () => {
 	const { root, store, cleanup } = freshStore();
 	try {
@@ -204,4 +225,52 @@ test("backfillFromSessionMessages：assistant/message 过滤 + 水位后补扫",
 	assert.equal(backfillFromSessionMessages(messages, { lastMessageId: "m2", lastStepSeq: 3 }).length, 0);
 	const seen = backfillFromSessionMessages(messages, { lastMessageId: "m2", lastStepSeq: 3 }, new Set(["m2"]));
 	assert.equal(seen.length, 0);
+});
+
+// ── P0-2：观察独立通道 ──────────────────────────────────────────────────
+test("appendObservation：写 observation 独立文件、不入主账本、MD 不镜像", () => {
+	const { store, cleanup } = freshStore();
+	try {
+		const ok = store.appendObservation("s1", { turn: 1, step: 5, hasText: false, textLen: 0, reasoningLen: 12000, hasArtifact: false });
+		assert.equal(ok, true);
+		assert.equal(existsSync(store.paths.observation("s1")), true);
+		assert.equal(existsSync(store.paths.jsonl("s1")), false, "观察不得污染主结论账本");
+		assert.equal(existsSync(store.paths.md("s1")), false, "观察不得生成 MD 镜像");
+		const obs = store.readObservations("s1");
+		assert.equal(obs.length, 1);
+		assert.equal(obs[0].kind, "reasoning-observation");
+		assert.equal(obs[0].step, 5);
+		assert.equal(obs[0].hasText, false);
+		assert.equal(obs[0].reasoningLen, 12000);
+	} finally { cleanup(); }
+});
+
+test("观察水位与总结水位拆分、读写独立文件", () => {
+	const { store, cleanup } = freshStore();
+	try {
+		assert.equal(store.saveObservationWatermark("s1", { lastStepSeq: 7, lastTs: 1700000000000 }), true);
+		const owm = store.loadObservationWatermark("s1");
+		assert.equal(owm.lastStepSeq, 7);
+		assert.equal(owm.lastTs, 1700000000000);
+		// 观察水位不影响总结水位
+		const wm = store.loadWatermark("s1");
+		assert.equal(wm, null, "观察水位写入后总结水位仍应为 null（通道拆分）");
+		assert.equal(store.loadObservationWatermark("nope"), null);
+	} finally { cleanup(); }
+});
+
+test("P2-21⑥：loadWatermark 坏字段/缺失统一返 null", () => {
+	const { store, root, cleanup } = freshStore();
+	try {
+		// 缺失文件 → null
+		assert.equal(store.loadWatermark("missing"), null);
+		// 显式写坏文件（lastStepSeq 非法字符串、lastMessageId 非字符串）→ null（不再坏字段返 0）
+		mkdirSync(join(root, "watermark"), { recursive: true });
+		writeFileSync(join(root, "watermark", "bad.json"), JSON.stringify({ sessionId: "s1", lastMessageId: 42, lastStepSeq: "abc", ts: null }));
+		assert.equal(store.loadWatermark("bad"), null);
+		// 仅尺寸/时间字段非法、实质序为 null → 按 null 处理
+		const validRw = store.saveWatermark("ok", { lastMessageId: "m1", lastStepSeq: 3 });
+		assert.equal(validRw, true);
+		assert.equal(store.loadWatermark("ok").lastStepSeq, 3);
+	} finally { cleanup(); }
 });

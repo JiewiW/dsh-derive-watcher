@@ -13,7 +13,7 @@
 
 ### semantic-watcher/stall
 
-停滞状态机升级时发出（每级动作只发一次；`level` 1/2/3 分别对应注入提醒 / 注入+L2 deny / 注入+交接账本+可选 L2 reject）。
+停滞状态机升级时发出（每级动作只发一次；`level` 1/2/3 分别对应注入提醒 / 注入+L2 deny / 注入+交接账本+可选 L2 reject）。**P0-8 观察旁路**：连续 K 个无 text/产物 step 且墙钟跨度≥T 时 also 发 `level=1` stall（此时经 `stallWatch` 路径，载荷带 `spanMs` 字段）。
 
 ```json
 {
@@ -29,7 +29,22 @@
 }
 ```
 
-`code` 取值：`level=2` → `"semantic-stall-2"`（L2 denyToolCategory，TTL 到期自动解除）；`level=3` → `"semantic-stall"`（不可重试、不走 G1，经 rejectStep 在本 turn 下一 pre-step 边界消费）；`level=1` → `null`。
+wall-clock stall-1 的另一载荷形态（observation 旁路路径，无 `stallCount`/`code`，带 `spanMs`）：
+
+```json
+{
+  "sessionId": "session-4f4ead96",
+  "turn": 12,
+  "step": 47,
+  "evidenceSeq": 2,
+  "level": 1,
+  "spanMs": 305000,
+  "warning": "【语义监视 · stall-1】连续 3 个 step 未产出可见 text/产物（墙钟约 305 秒）。会话可能已空转停滞：请回顾目标，改变方法或换一条路径。",
+  "ts": "2026-10-09T08:15:31.000Z"
+}
+```
+
+`code` 取值：`level=2` → `"semantic-stall-2"`（L2 denyToolCategory，TTL 到期自动解除）；`level=3` → `"semantic-stall"`（不可重试、不走 G1，经 rejectStep 在本 turn 下一 pre-step 边界消费）；`level=1` → `null`（含 wall-clock 路径）。
 
 ### semantic-watcher/store-corruption
 
@@ -48,7 +63,7 @@
 }
 ```
 
-`stage` 取值：`validate`（条目 schema 校验失败，未落盘）/ `append`（长度守恒或回读解析失败）/ `md`（MD 镜像失败，非致命）/ `milestone` / `watermark` / `read`（账本读取时遇不可解析行）/ `gap`。
+`stage` 取值：`validate`（条目 schema 校验失败，未落盘）/ `append`（长度守恒或回读解析失败）/ `md`（MD 镜像失败，非致命）/ `milestone` / `watermark` / `observation`（观察账本写入失败）/ `read`（账本读取时遇不可解析行）/ `gap`。
 
 ### semantic-watcher/injection-skipped
 
@@ -98,7 +113,7 @@ L2 step-governor 不可用或调用失败时发出，动作按 fail-open 降级�
 
 ### semantic-watcher/summarizer-degraded
 
-总结 worker 降级时发出：畸形 JSON 重试后仍无效 / 队列溢出丢最旧 / 连续 gap ≥3（此时停滞响应暂停、保持不升级）。
+总结 worker 降级时发出：畸形 JSON 重试后仍无效 / 队列溢出丢最旧（**P0-8 后连续 gap ≥3 不再暂停停滞响应，改为降级继续计数**）。**P2-22③** 载荷携带 `grade` 区分降级原因：`timeout`（超时/中止）/ `parse-error`（解析失败）/ `other`/（含熔断短路）；`appendGap` 的 gap 行同样写入 `grade` 字段。
 
 ```json
 {
@@ -106,6 +121,7 @@ L2 step-governor 不可用或调用失败时发出，动作按 fail-open 降级�
   "turn": 12,
   "step": 45,
   "evidenceSeq": 7,
+  "grade": "parse-error",
   "suppressReason": "总结草稿 JSON 畸形（重试 1 次后仍无效），跳过本条并记 gap",
   "messageId": "am-1057",
   "ts": "2026-10-09T08:15:35.000Z"

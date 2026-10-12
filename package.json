@@ -20,7 +20,8 @@
     "README.md"
   ],
   "scripts": {
-    "test": "node --test test/"
+    "test": "node --test \"test/*.test.js\"",
+    "test:p225": "node --test replay/p2-25/p2-25-regression.test.mjs"
   },
   "dsh": {
     "bundle": {
