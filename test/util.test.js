@@ -45,6 +45,7 @@ test("EVT 冻结映射（§5.8 全部事件名）", () => {
 	assert.equal(EVT.HEARTBEAT, "semantic-watcher/heartbeat");
 	assert.equal(EVT.FOLD_MILESTONE, "semantic-watcher/fold-milestone");
 	assert.equal(EVT.RETENTION_CLEANED, "semantic-watcher/retention-cleaned");
+	assert.equal(EVT.INTERVENTION, "semantic-watcher/intervention");
 });
 
 test("SUPPRESSED_EVENTS 含三个抑制类事件", () => {

@@ -1,7 +1,7 @@
 {
   "name": "dsh-derive-watcher",
-  "version": "0.1.1",
-  "description": "语义监视者（L3）：会话语义旅程账本、flash 总结、新颖性判定、里程碑折叠、上下文注入与三级语义停滞响应（P0-P3；stall-2/3 的 L2 联调属 P4）",
+  "version": "0.2.0",
+  "description": "语义监视者（L3）：会话语义旅程账本、flash 总结、新颖性判定、里程碑折叠、上下文注入、三级语义停滞响应，以及右侧栏干预时间线（timeline）",
   "keywords": ["dsh", "deepseek-harness", "dsh-plugin", "semantic-watcher", "journey"],
   "type": "module",
   "main": "lib/index.js",
@@ -20,7 +20,7 @@
     "README.md"
   ],
   "scripts": {
-    "test": "node --test \"test/*.test.js\"",
+    "test": "node --test --test-concurrency=1 \"test/*.test.js\"",
     "test:p225": "node --test replay/p2-25/p2-25-regression.test.mjs"
   },
   "dsh": {
@@ -29,11 +29,15 @@
     },
     "client": {
       "platform": "web",
-      "inject": []
+      "inject": ["@deepseek-ai/dsh-client-ui-slots"]
     }
   },
   "peerDependencies": {
     "@deepseek-ai/dsh": ">=0.1.5-rc.1 <0.2.0 || >=0.2.0-rc.1 <0.3.0-0"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/JiewiW/dsh-derive-watcher.git"
+  }
 }

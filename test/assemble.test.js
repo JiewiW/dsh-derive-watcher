@@ -106,12 +106,17 @@ after(() => {
 	try { rmSync(tempRoot, { recursive: true, force: true }); } catch { /* 同上 */ }
 });
 
-test("apply：注册 session/event 与 agent/pre-step 监听 + 设置路由（exact）", () => {
+test("apply：注册 session/event 与 agent/pre-step 监听 + 三条路由（settings + timeline×2，均 exact）", () => {
 	assert.ok(ctx.handlers.get("session/event")?.length === 1);
 	assert.ok(ctx.handlers.get("agent/pre-step")?.length === 1);
-	assert.equal(ctx.routes.length, 1);
-	assert.equal(ctx.routes[0].kind, "exact");
-	assert.equal(ctx.routes[0].path, "/plugins/derive-watcher/settings");
+	assert.equal(ctx.routes.length, 3);
+	const paths = ctx.routes.map((r) => r.path).sort();
+	assert.deepEqual(paths, [
+		"/plugins/derive-watcher/settings",
+		"/plugins/derive-watcher/timeline",
+		"/plugins/derive-watcher/timeline/sessions"
+	].sort());
+	assert.ok(ctx.routes.every((r) => r.kind === "exact"));
 });
 
 test("设置 GET 返回 schema + settings + defaults + capabilities", async () => {

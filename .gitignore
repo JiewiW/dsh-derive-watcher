@@ -6,3 +6,6 @@ replay/transcripts/
 replay/replay-ledger/
 test-report.txt
 *.log
+
+# 本地工作目录（任务 Prompt 恢复件、临时取证脚本/备份，禁止入库）
+.dsh-work/

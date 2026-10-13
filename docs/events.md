@@ -46,6 +46,57 @@ wall-clock stall-1 的另一载荷形态（observation 旁路路径，无 `stall
 
 `code` 取值：`level=2` → `"semantic-stall-2"`（L2 denyToolCategory，TTL 到期自动解除）；`level=3` → `"semantic-stall"`（不可重试、不走 G1，经 rejectStep 在本 turn 下一 pre-step 边界消费）；`level=1` → `null`（含 wall-clock 路径）。
 
+### semantic-watcher/intervention（v0.2.0 新增）
+
+stall-2/3 升级时对 L2（step-governor）的干预调用**成功返回**后发出，用于把「干预是否真的被受理」沉淀进时间线。与 `stall` 一一对应但语义不同：`stall` 表示「升级到某级」，`intervention` 表示「该级请求 L2 动作后的受理结果」。只在成功分支发出；L2 调用失败/不可用仍发 `execution-unavailable`，**不发** intervention。
+
+公共字段之外，**必带** `action`、`accepted`、`code`、`level`；`ttlSteps` / `expiresAtStep` / `pending` 仅在 L2 返回值中真实存在且类型正确（number/boolean）时才写入，缺失即省略，禁止编造。
+
+stall-2 deny-read 受理样例：
+
+```json
+{
+  "sessionId": "session-4f4ead96",
+  "turn": 12,
+  "step": 47,
+  "evidenceSeq": 2,
+  "level": 2,
+  "stallCount": 6,
+  "action": "deny-read",
+  "accepted": true,
+  "code": "semantic-stall-2",
+  "ttlSteps": 4,
+  "expiresAtStep": 50,
+  "ts": "2026-10-09T08:15:30.200Z"
+}
+```
+
+stall-3 reject-step 受理样例（L2 返回 pending 时）：
+
+```json
+{
+  "sessionId": "session-4f4ead96",
+  "turn": 12,
+  "step": 47,
+  "evidenceSeq": 3,
+  "level": 3,
+  "stallCount": 10,
+  "action": "reject-step",
+  "accepted": true,
+  "code": "semantic-stall",
+  "pending": true,
+  "ts": "2026-10-09T08:15:32.000Z"
+}
+```
+
+字段来源（对齐 L2 真实返回契约）：
+
+- `action`：`"deny-read"`（stall-2，调 `denyToolCategory(sid,"read",{code,evidenceSeq,ttlSteps})`）或 `"reject-step"`（stall-3，调 `rejectStep(sid,{code,evidenceSeq})`）。
+- `accepted`：deny 取受理布尔；reject 取 L2 返回的 `accepted`（可能为 `false` 但 `pending:true`，此时如实记录 `accepted:false`，不强行置真）。
+- `expiresAtStep`：仅 deny 受理返回里带该 number 时写入（= `evidenceSeq + ttlSteps`）。
+- `pending`：仅 reject 返回里带该 boolean 时写入。
+- 发射 fail-soft：事件汇自身抛错只打一行 `intervention 事件发射失败（干预结果不受影响）`，不影响 stall 主流程与既有失败分支。
+
 ### semantic-watcher/store-corruption
 
 账本完整性校验失败（长度守恒破坏 / 回读 JSON.parse 失败 / 条目校验失败 / 水位写入失败）时发出，同时停止该条写入。
@@ -199,3 +250,4 @@ retention 清理（默认 30 天，按 mtime 扫描归档目录）删除文件�
 - `semantic-stall-2`：denyToolCategory(sessionId, "read", {code, evidenceSeq, ttlSteps})，幂等键 (sessionId, evidenceSeq, code)，TTL=stall3Steps−stall2Steps，到期自动解除。
 - `semantic-stall`：rejectStep(sessionId, {code, evidenceSeq})，幂等键 (sessionId, evidenceSeq)，pending 在本 turn 下一 pre-step 边界消费、turn 结束或真人消息清除。默认 `enableStall3Reject=false`（影子期只告警），开启前必须确认 driver 已按 code 分派（现状一律 block 为 prompt-rejected，未满足前禁止在真实 goal 会话开启 stall-3）。
 - L2 不可用一律 fail-open 并发 `semantic-watcher/execution-unavailable`。
+- 两个调用**成功返回**后另发 `semantic-watcher/intervention`（`action` = `deny-read` / `reject-step`），承载受理结果与 TTL/解除步；失败不发。timeline 把它特化为 `source:"intervention"` 醒目卡片。

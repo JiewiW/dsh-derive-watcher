@@ -5,7 +5,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createStallController } from "../lib/stall.js";
-import { EVT } from "../lib/events.js";
+import { EVT, createEventSink } from "../lib/events.js";
 import { DEFAULT_SETTINGS } from "../lib/settings.js";
 
 const settle = async (n = 4) => { for (let i = 0; i < n; i++) await new Promise((r) => setImmediate(r)); };
@@ -27,6 +27,7 @@ const semDup = (step) => ({ id: `j_${String(step).padStart(4, "0")}`, turn: 1, s
 const newEntry = (step) => ({ id: `j_${String(step).padStart(4, "0")}`, turn: 1, step, novelty: "new", semantic_duplicate: false, duplicate_of: null });
 const stalls = (events) => events.filter((e) => e.n === EVT.STALL);
 const unavailable = (events) => events.filter((e) => e.n === EVT.EXECUTION_UNAVAILABLE);
+const interventions = (events) => events.filter((e) => e.n === EVT.INTERVENTION);
 
 test("纯词法 duplicate 只记账 + lexical-repeat，不升级", () => {
 	const { events, controller } = harness();
@@ -293,4 +294,135 @@ test("onUserMessage 后 gap 计数也清零", () => {
 	controller.onUserMessage("s1");
 	assert.equal(controller.getSnapshot("s1").consecutiveGap, 0);
 	assert.equal(controller.getSnapshot("s1").paused, false);
+});
+
+// ── v0.2.0 步骤1：intervention 受理事件埋点 ────────────────────────────────
+
+test("intervention：deny 受理 → semantic-watcher/intervention 经 session.append 落库，action/accepted/code/level 正确", async () => {
+	const appended = [];
+	const session = { id: "s1", append: (name, payload, opts) => appended.push({ name, payload, opts }) };
+	const sink = createEventSink({ log: () => {} });
+	const controller = createStallController({
+		emit: (name, payload) => sink.emit(session, name, payload),
+		log: () => {},
+		getSettings: () => ({ ...DEFAULT_SETTINGS, enableStall2Deny: true }),
+		getL2: () => ({ denyToolCategory: async () => ({ accepted: true, expiresAtStep: 99 }) })
+	});
+	controller.onEntries("s1", [semDup(1), semDup(2), semDup(3)]);
+	controller.onEntries("s1", [semDup(4), semDup(5), semDup(6)]);
+	await settle();
+	const iv = appended.filter((a) => a.name === EVT.INTERVENTION);
+	assert.equal(iv.length, 1);
+	assert.equal(iv[0].opts.ignorable, true, "仍走既有 session.append(ignorable) 通道");
+	const p = iv[0].payload;
+	assert.equal(p.sessionId, "s1");
+	assert.equal(p.action, "deny-read");
+	assert.equal(p.accepted, true);
+	assert.equal(p.code, "semantic-stall-2");
+	assert.equal(p.level, 2);
+	assert.equal(p.ttlSteps, 4, "ttlSteps = t3 - t2 = 4（真实入参）");
+	assert.equal(p.expiresAtStep, 99, "expiresAtStep 取 L2 真实返回值");
+	assert.equal(p.evidenceSeq, 2);
+	assert.equal(typeof p.ts, "string", "ts 由 createEventSink 补 ISO 字符串（既有契约）");
+	assert.equal(appended.filter((a) => a.name === EVT.EXECUTION_UNAVAILABLE).length, 0);
+});
+
+test("intervention：reject 受理（accepted:false,pending:true）→ accepted=false 如实记录、pending=true", async () => {
+	const { events, controller } = harness({
+		settings: { enableStall3Reject: true },
+		getL2: () => ({ rejectStep: async () => ({ accepted: false, pending: true }) }),
+		writeHandoff: async () => ({ path: "h.md", seedPath: null })
+	});
+	controller.onEntries("s1", [semDup(1), semDup(2), semDup(3)]);
+	controller.onEntries("s1", [semDup(4), semDup(5), semDup(6)]);
+	controller.onEntries("s1", [semDup(7), semDup(8), semDup(9), semDup(10)]);
+	await settle();
+	const iv = interventions(events);
+	assert.equal(iv.length, 1);
+	assert.equal(iv[0].p.action, "reject-step");
+	assert.equal(iv[0].p.accepted, false, "只记 L2 真实值，不编造");
+	assert.equal(iv[0].p.pending, true);
+	assert.equal(iv[0].p.code, "semantic-stall");
+	assert.equal(iv[0].p.level, 3);
+	assert.equal(iv[0].p.ttlSteps, undefined, "reject 无 ttlSteps 不写");
+	assert.equal(iv[0].p.expiresAtStep, undefined, "reject 无 expiresAtStep 不写");
+});
+
+test("intervention：reject 受理（accepted:true,pending:true）→ accepted=true", async () => {
+	const { events, controller } = harness({
+		settings: { enableStall3Reject: true },
+		getL2: () => ({ rejectStep: async () => ({ accepted: true, pending: true }) }),
+		writeHandoff: async () => ({ path: "h.md", seedPath: null })
+	});
+	controller.onEntries("s1", [semDup(1), semDup(2), semDup(3)]);
+	controller.onEntries("s1", [semDup(4), semDup(5), semDup(6)]);
+	controller.onEntries("s1", [semDup(7), semDup(8), semDup(9), semDup(10)]);
+	await settle();
+	const iv = interventions(events);
+	assert.equal(iv.length, 1);
+	assert.equal(iv[0].p.accepted, true);
+	assert.equal(iv[0].p.pending, true);
+});
+
+test("intervention：deny 返回缺 expiresAtStep → 该字段省略，不编造", async () => {
+	const { events, controller } = harness({
+		settings: { enableStall2Deny: true },
+		getL2: () => ({ denyToolCategory: async () => ({ accepted: true }) })
+	});
+	controller.onEntries("s1", [semDup(1), semDup(2), semDup(3)]);
+	controller.onEntries("s1", [semDup(4), semDup(5), semDup(6)]);
+	await settle();
+	const iv = interventions(events);
+	assert.equal(iv.length, 1);
+	assert.equal(iv[0].p.expiresAtStep, undefined);
+	assert.equal(iv[0].p.accepted, true);
+});
+
+test("intervention：L2 抛错 → 无 intervention，仍 execution-unavailable 且不抛穿", async () => {
+	const { events, controller } = harness({
+		settings: { enableStall2Deny: true },
+		getL2: () => ({ denyToolCategory: async () => { throw new Error("governor down"); } })
+	});
+	controller.onEntries("s1", [semDup(1), semDup(2), semDup(3)]);
+	const r = controller.onEntries("s1", [semDup(4), semDup(5), semDup(6)]);
+	await settle();
+	assert.equal(r.level, 2, "主流程返回不受影响");
+	assert.equal(interventions(events).length, 0);
+	const u = unavailable(events);
+	assert.equal(u.length, 1);
+	assert.ok(u[0].p.suppressReason.includes("denyToolCategory"));
+});
+
+test("intervention：deny 未受理（accepted:false）→ 走原失败分支，无 intervention", async () => {
+	const { events, controller } = harness({
+		settings: { enableStall2Deny: true },
+		getL2: () => ({ denyToolCategory: async () => ({ accepted: false, reason: "未知类别" }) })
+	});
+	controller.onEntries("s1", [semDup(1), semDup(2), semDup(3)]);
+	controller.onEntries("s1", [semDup(4), semDup(5), semDup(6)]);
+	await settle();
+	assert.equal(interventions(events).length, 0);
+	const u = unavailable(events);
+	assert.equal(u.length, 1);
+	assert.ok(u[0].p.suppressReason.includes("未知类别"));
+});
+
+test("intervention：emit 自身抛错 → fail-soft 只记一行 log，不影响主流程与失败分支", async () => {
+	const lines = [];
+	const events = [];
+	const controller = createStallController({
+		emit: (n, p) => {
+			if (n === EVT.INTERVENTION) throw new Error("sink exploded");
+			events.push({ n, p });
+		},
+		log: (line) => lines.push(line),
+		getSettings: () => ({ ...DEFAULT_SETTINGS, enableStall2Deny: true }),
+		getL2: () => ({ denyToolCategory: async () => ({ accepted: true, expiresAtStep: 50 }) })
+	});
+	controller.onEntries("s1", [semDup(1), semDup(2), semDup(3)]);
+	const r = controller.onEntries("s1", [semDup(4), semDup(5), semDup(6)]);
+	await settle();
+	assert.equal(r.level, 2);
+	assert.equal(events.filter((e) => e.n === EVT.EXECUTION_UNAVAILABLE).length, 0, "emit 抛错不得混入降级事件");
+	assert.ok(lines.some((l) => l.includes("intervention 事件发射失败")), "fail-soft 留一行旁证");
 });
