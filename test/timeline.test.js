@@ -138,7 +138,7 @@ test("GET timeline：五来源归并、ts 降序、脏行跳过、intervention �
 	assert.equal(iv.kind, "deny-read");
 	assert.equal(iv.accepted, true);
 	assert.equal(iv.level ?? iv.data.level, 2);
-	assert.ok(iv.title.includes("已暂停 read 类工具") && iv.title.includes("干预已受理"), `标题：${iv.title}`);
+	assert.ok(iv.title.includes("已临时禁止读取文件等工具") && iv.title.includes("已生效"), `标题：${iv.title}`);
 	assert.ok(iv.summary.includes("第 50 步后解除") && iv.summary.includes("TTL 4 步"), `摘要：${iv.summary}`);
 	assert.equal(iv.data.code, "semantic-stall-2");
 	assert.equal(iv.data.expiresAtStep, 50);
