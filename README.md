@@ -20,7 +20,7 @@ DeepSeek Harness（DSH）插件：观察 agent 会话的**语义进展**，把�
 reasoning（思考块）与正式 text 分开观察、走独立账本：当模型长期只有思考没有正文产出时，以 reasoning 流为准，且思考内容绝不混入正式结论。
 
 **2. Flash 总结**
-条目由小模型异步总结产出：单并发队列（上限 2）、单次 30 秒超时、畸形结果重试 1 次、队列溢出丢最旧并记 gap。模型返回空数组算正常结果（只推进水位），只有解析失败才算 gap。
+条目由小模型异步总结产出：单并发队列（上限 2）、单次 30 秒超时、畸形结果重试 1 次、队列溢出丢最旧并记 gap。总结调用默认跟随触发消息的 provider/model（也可由 `summaryProvider` / `summaryModel` 显式指定）。模型返回空数组算正常结果（只推进水位）；调用失败按**无可用模型路由 / 超时 / 草稿解析失败 / 空回复**分类落 gap，并作为独立来源出现在 timeline 上——「为什么这步没有结论」始终可见，不会静默丢失。
 
 **3. 新颖性判定**
 中文归一化后做字符 3-gram MinHash 词法比对（Jaccard 阈值 0.8），再经 LLM schema 自检确认；也可选 embedding 余弦（阈值 0.85），模型无 embedding 能力时自动回退。
@@ -52,10 +52,11 @@ DSH Web 右侧栏新增「语义监视」选项卡，把一次会话的治理痕
 | `intervention` | stall-2/3 的 L2 干预**受理结果**（deny-read / reject-step），醒目卡片 |
 | `watcher-event` | 其余 `semantic-watcher/*` 事件（stall、heartbeat、handoff-written 等） |
 | `milestone` | 里程碑折叠产出 |
+| `gap` | **总结跳过**（无可用模型路由 / 超时 / 草稿解析失败 / 空回复，带原因徽标；无 grade 时显示「原因未知」） |
 | `journey` | 语义旅程条目（finding/decision/…，含重复标记） |
 | `observation` | 每步 reasoning/text/产物观察（默认折叠，可展开） |
 
-干预卡片展示动作（如「已暂停 read 类工具」）、所在 `turn/step`、是否被 step-governor 受理、TTL 与解除步（`expiresAtStep`），字段全部取自 L2 真实返回，缺失即省略、不编造。顶部可切换会话（语义账本会话 ∪ 内核 sessionQuery 并集，带标题/cwd/live），每 5 秒自动刷新；时间戳支持 ISO 字符串与毫秒数字双形态，脏 JSONL 行自动跳过。
+干预卡片展示动作（如「已暂停 read 类工具」）、所在 `turn/step`、是否被 step-governor 受理、TTL 与解除步（`expiresAtStep`），字段全部取自 L2 真实返回，缺失即省略、不编造。顶部可切换会话（语义账本会话 ∪ 内核 sessionQuery 并集，带标题/cwd/live），每 5 秒自动刷新；时间戳支持 ISO 字符串与毫秒数字双形态，脏 JSONL 行自动跳过；心跳事件默认折叠，面板顶部可勾选「显示心跳」。
 
 宿主侧新增两个只读路由（见 [docs/events.md](docs/events.md)）：
 
@@ -67,7 +68,7 @@ DSH Web 右侧栏新增「语义监视」选项卡，把一次会话的治理痕
 ## 安装
 
 ```sh
-dsh plugin --profile <你的profile> add github:JiewiW/dsh-derive-watcher#v0.2.0
+dsh plugin --profile <你的profile> add github:JiewiW/dsh-derive-watcher#v0.2.1
 ```
 
 零第三方运行时依赖。账本默认落在 `~/.dsh/storages/semantic-watcher/`（设置项 `storagePath` 可改）。
@@ -104,13 +105,13 @@ dsh plugin --profile <你的profile> add github:JiewiW/dsh-derive-watcher#v0.2.0
 ## 测试
 
 ```sh
-npm test            # node --test --test-concurrency=1 "test/*.test.js"，133 用例
+npm test            # node --test --test-concurrency=1 "test/*.test.js"，134 用例
 npm run test:p225   # P2-25 事务四线回归（11 用例）
 ```
 
 > 测试串行执行（`--test-concurrency=1`）：timeline / assemble 两组用例都会写全局 settings.json，并行会互相踩踏。
 
-覆盖：账本转写与长度守恒、MinHash 边界、畸形 JSON 重试、折叠链完整性（dead-end 零丢失）、注入预算与句界裁剪、stall 全部口径（gap / 背离 / 重置 / 阈值倒挂 / 墙钟旁路）、intervention 受理埋点（7 用例，含 fail-soft 与字段不编造）、timeline 四来源归并/排序/脏行/降级/参数校验（9 用例）、设置 clamp 与联动、L2 不可用降级。
+覆盖：账本转写与长度守恒、MinHash 边界、畸形 JSON 重试、折叠链完整性（dead-end 零丢失）、注入预算与句界裁剪、stall 全部口径（gap / 背离 / 重置 / 阈值倒挂 / 墙钟旁路）、intervention 受理埋点（7 用例，含 fail-soft 与字段不编造）、timeline 五来源归并/排序/脏行/降级/参数校验（9 用例）、设置 clamp 与联动、L2 不可用降级。
 
 ## 离线回放
 
@@ -121,6 +122,11 @@ npm run test:p225   # P2-25 事务四线回归（11 用例）
 - stall-2/3 的 L2 联动已有**受理事件埋点**（`intervention`）与 mock/真实 host smoke 验证；尚缺一次真实语义停滞下的 L2 端到端实跑；
 - 宿主 driver 对 stall-3 拒绝码（`semantic-stall`）的分派支持；
 - `enableStall2Deny` / `enableStall3Reject` 待影子期验收后开启默认值。
+
+## 版本记录
+
+- **0.2.1**：修复总结器模型路由缺失（调用未传 provider/model，内核返回 `NO_ADAPTER`，此前被统一误判为草稿解析失败）——该缺陷使所有会话的语义条目 100% 落成 `gap`，timeline 上只能看到心跳与降级事件。同时新增 `gap` 时间线来源与原因徽标、心跳默认折叠、超时与失败分类日志。
+- **0.2.0**：右侧栏「语义监视」timeline 选项卡与 `intervention` 干预受理事件埋点。
 
 ## 许可
 

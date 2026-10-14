@@ -1,6 +1,6 @@
 {
   "name": "dsh-derive-watcher",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "语义监视者（L3）：会话语义旅程账本、flash 总结、新颖性判定、里程碑折叠、上下文注入、三级语义停滞响应，以及右侧栏干预时间线（timeline）",
   "keywords": ["dsh", "deepseek-harness", "dsh-plugin", "semantic-watcher", "journey"],
   "type": "module",

@@ -115,17 +115,24 @@ test("toMillis：ISO 字符串与毫秒数字双形态归一", () => {
 	assert.equal(toMillis(undefined), null);
 });
 
-test("GET timeline：四来源归并、ts 降序、脏行跳过、intervention 卡片字段", async () => {
+test("GET timeline：五来源归并、ts 降序、脏行跳过、intervention 卡片字段", async () => {
 	const { status, body } = await getJson("/plugins/derive-watcher/timeline?sessionId=s1");
 	assert.equal(status, 200);
 	assert.equal(body.ok, true);
 	assert.equal(body.counts.journey, 2, "脏行被跳过、gap 行不入 journey");
+	assert.equal(body.counts.gap, 1, "gap 行独立计入 gap 来源");
 	assert.equal(body.counts.milestone, 1);
 	assert.equal(body.counts.observation, 2);
 	assert.equal(body.counts.intervention, 1);
 	assert.equal(body.counts["watcher-event"], 2, "stall 与 handoff-written");
 	const sources = body.items.map((i) => i.source);
-	assert.deepEqual(sources, ["intervention", "watcher-event", "journey", "observation", "milestone", "observation", "journey", "watcher-event"], "ts 降序交错：6>5.5>5>4>3>2>1>0");
+	assert.deepEqual(sources, ["intervention", "watcher-event", "journey", "gap", "observation", "milestone", "observation", "journey", "watcher-event"], "ts 降序交错：6>5.5>5（同 ts 比 turn/step：journey step7 在前，无 turn/step 的老 gap 在后）>4>3>2>1>0");
+	// 无 grade/reason 的老 gap 行：标题回退「原因未知」，摘要为空串而非 undefined
+	const gapItem = body.items.find((i) => i.source === "gap");
+	assert.equal(gapItem.kind, "summary-gap");
+	assert.equal(gapItem.grade, null);
+	assert.equal(gapItem.title, "总结跳过（原因未知）");
+	assert.equal(gapItem.summary, "");
 	const iv = body.items[0];
 	assert.equal(iv.id, `evt:semantic-watcher/intervention:${WATCHER_RECORDS_LITE[3].seq}`);
 	assert.equal(iv.kind, "deny-read");

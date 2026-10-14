@@ -306,6 +306,29 @@ test("makeLlmCall：flash 钉定（provider/model 留空传 undefined）+ text �
 	assert.equal(captured.signal instanceof AbortSignal, true);
 });
 
+test("makeLlmCall：per-call provider/model 覆盖闭包设置；finish/error 终块 failure 透 onMeta", async () => {
+	// 事故回归：settings 留空 + 消息不带 source 时内核 registration(undefined) 抛 NO_ADAPTER，
+	// 以 finish/error 终块返回而不抛异常；修复后路由取自 msg.source 且失败真因必须留证。
+	let captured = null;
+	let metas = null;
+	const fakeLlm = {
+		stream: (opts) => {
+			captured = opts;
+			return (async function* () {
+				yield { type: "finish", reason: { kind: "error", failure: { code: "NO_ADAPTER", message: 'no adapter registered for provider "undefined"' } } };
+			})();
+		}
+	};
+	const c = makeLlmCall({ llm: fakeLlm, provider: "", model: "", source: null, onMeta: (m) => { metas = m; } });
+	const out = await c({ prompt: "p", provider: "trae", model: "Doubao-Seed-Evolving" });
+	assert.equal(out, null, "错误终块无文本 → null（由包装层按 meta 翻译真因，而非误诊 JSON 畸形）");
+	assert.equal(captured.provider, "trae", "per-call provider 必须覆盖闭包空设置");
+	assert.equal(captured.model, "Doubao-Seed-Evolving");
+	assert.equal(metas.failureCode, "NO_ADAPTER");
+	assert.ok(String(metas.failureMessage).includes("no adapter registered"), `failure.message=${metas.failureMessage}`);
+	assert.equal(metas.finishKind, "error");
+});
+
 test("P2-22 makeLlmCall：finish/usage 埋点 + onMeta 透出截断证据", async () => {
 	let metas = null;
 	let captured = null;
