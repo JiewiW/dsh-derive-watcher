@@ -44,7 +44,7 @@ wall-clock stall-1 的另一载荷形态（observation 旁路路径，无 `stall
 }
 ```
 
-`code` 取值：`level=2` → `"semantic-stall-2"`（L2 denyToolCategory，TTL 到期自动解除）；`level=3` → `"semantic-stall"`（不可重试、不走 G1，经 rejectStep 在本 turn 下一 pre-step 边界消费）；`level=1` → `null`（含 wall-clock 路径）。
+`code` 取值：`level=2` → `"semantic-stall-2"`（L2 denyToolCategory，TTL 到期自动解除）；`level=3` → `"semantic-stall"`（不可重试、不走 G1，经 rejectStep 在本 turn 下一 pre-step 边界消费）；`level=1` → `null`（含 wall-clock 路径）。改进①：词法重复计入升级时（`enableLexicalStallCount=true`），词法来源的 code 为 `"lexical-stall-2"` / `"lexical-stall"`，与语义来源区分。
 
 ### semantic-watcher/intervention（v0.2.0 新增）
 
@@ -118,7 +118,9 @@ stall-3 reject-step 受理样例（L2 返回 pending 时）：
 
 ### semantic-watcher/injection-skipped
 
-agent/pre-step 注入组装失败时发出（结构校验失败 / token 预算溢出 / 账本读取失败），本步不注入。
+agent/pre-step 注入组装失败时发出（结构校验失败 / 账本读取失败 / 连一条压缩后的要点行都放不下），本步不注入。
+
+> 预算吃紧不再直接跳过：先按「里程碑正文句界裁剪 → 剔除最旧结论 → 收缩目标与死胡同 → 摘要压成短句」逐级降级，仍放不下时只注入最新要点单行（注入文本头部标注「预算已达上限」）。只有单行也超预算才发本事件，`suppressReason` 为「预算溢出：一条压缩后的要点行仍超 token 预算 N」。
 
 ```json
 {
@@ -126,7 +128,7 @@ agent/pre-step 注入组装失败时发出（结构校验失败 / token 预算�
   "turn": 12,
   "step": 48,
   "evidenceSeq": 4,
-  "suppressReason": "预算溢出：不可裁剪项（目标/死胡同标题）已超 token 预算 1200",
+  "suppressReason": "预算溢出：一条压缩后的要点行仍超 token 预算 800",
   "ts": "2026-10-09T08:15:32.000Z"
 }
 ```
@@ -159,6 +161,24 @@ L2 step-governor 不可用或调用失败时发出，动作按 fail-open 降级�
   "duplicateOf": "j_0038",
   "stallCount": 4,
   "ts": "2026-10-09T08:15:34.000Z"
+}
+```
+
+### semantic-watcher/lexical-stall
+
+词法复读独立警告（改进④；`lexicalStallSteps > 0` 时连续 N 条纯词法重复触发）。仅提示，不升级停滞、不拦截任何动作；每个连续序列只发一次，遇 new 落账或真人消息复位后重新计数，语义重复会打断词法连续序列。
+
+```json
+{
+  "sessionId": "session-4f4ead96",
+  "turn": 12,
+  "step": 45,
+  "evidenceSeq": 7,
+  "level": 1,
+  "lexicalCount": 3,
+  "stallCount": 6,
+  "warning": "【语义监视 · 词法复读停滞】连续 3 条回复与最近文本近乎逐字重复，疑似陷入复读。请改变措辞、补充新论点，或明确中止当前输出路径。",
+  "ts": "2026-10-09T08:15:35.000Z"
 }
 ```
 

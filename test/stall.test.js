@@ -426,3 +426,209 @@ test("intervention：emit 自身抛错 → fail-soft 只记一行 log，不影�
 	assert.equal(events.filter((e) => e.n === EVT.EXECUTION_UNAVAILABLE).length, 0, "emit 抛错不得混入降级事件");
 	assert.ok(lines.some((l) => l.includes("intervention 事件发射失败")), "fail-soft 留一行旁证");
 });
+
+// ── 步骤4：reasoning-only 独立停滞窗口（注入 ts，禁真实 sleep；只提示，绝不升级 deny/reject）──
+const reasoningOnly = (step, ts) => ({ turn: 1, step, ts, hasText: false, textLen: 0, reasoningLen: 120, hasArtifact: false });
+
+function reasoningHarness(settings = {}) {
+	const events = [];
+	const reasoningCalls = [];
+	const controller = createStallController({
+		emit: (n, p) => events.push({ n, p }),
+		log: () => {},
+		getSettings: () => ({ ...DEFAULT_SETTINGS, reasoningStallWatchSteps: 3, reasoningStallWatchWindowSec: 60, ...settings }),
+		onReasoningStall: (sid, info) => reasoningCalls.push({ sid, ...info }),
+		now: () => 0
+	});
+	return { events, reasoningCalls, controller };
+}
+
+test("步骤4-① 步数够但墙钟跨度不足 → 不报 reasoning-stall", () => {
+	const { events, reasoningCalls, controller } = reasoningHarness();
+	// 3 个 reasoning-only step（=K），但跨度 59s < 60s
+	controller.onObservation("s1", reasoningOnly(1, 0));
+	controller.onObservation("s1", reasoningOnly(2, 30_000));
+	const r = controller.onObservation("s1", reasoningOnly(3, 59_000));
+	assert.equal(r.reasoningRunCount, 3);
+	assert.equal(r.reasoningFired, false);
+	assert.equal(events.filter((e) => e.n === EVT.REASONING_STALL).length, 0);
+	assert.equal(reasoningCalls.length, 0);
+});
+
+test("步骤4-② 墙钟跨度够但步数不足 → 不报 reasoning-stall", () => {
+	const { events, reasoningCalls, controller } = reasoningHarness();
+	controller.onObservation("s1", reasoningOnly(1, 0));
+	const r = controller.onObservation("s1", reasoningOnly(2, 100_000)); // 仅 2 步 < K=3，跨度已 100s
+	assert.equal(r.reasoningFired, false);
+	assert.equal(r.reasoningRunCount, 2);
+	assert.equal(events.filter((e) => e.n === EVT.REASONING_STALL).length, 0);
+	assert.equal(reasoningCalls.length, 0);
+});
+
+test("步骤4-③ 步数与墙钟都够 → 报且仅报一次，只提示不升级；命中清空窗口后可重新计数", () => {
+	const { events, reasoningCalls, controller } = reasoningHarness();
+	controller.onObservation("s1", reasoningOnly(1, 0));
+	controller.onObservation("s1", reasoningOnly(2, 30_000));
+	const fired = controller.onObservation("s1", reasoningOnly(3, 60_000)); // 3 步、跨度 60s
+	assert.equal(fired.reasoningFired, true);
+	assert.equal(fired.reasoningRunCount, 3);
+	assert.equal(fired.reasoningSpanMs, 60_000);
+	const rs = events.filter((e) => e.n === EVT.REASONING_STALL);
+	assert.equal(rs.length, 1, "同一连续序列只报一次");
+	assert.equal(rs[0].p.level, 0, "reasoning-stall level 恒 0（提示，不进 stall-1/2/3）");
+	assert.ok(rs[0].p.warning.includes("推理停滞"), "文案区分于普通 stall-1");
+	assert.ok(rs[0].p.warning.includes("非正式结论"), "文案须标注非正式结论");
+	assert.equal(reasoningCalls.length, 1, "onReasoningStall 回调恰好一次");
+	assert.equal(reasoningCalls[0].reasoningRunCount, 3);
+	// 绝不触发普通 stall / deny / reject 升级
+	assert.equal(events.filter((e) => e.n === EVT.STALL).length, 0);
+	assert.equal(interventions(events).length, 0);
+	// 命中即清空：第 4 步是新序列第 1 步，不重复报
+	const after = controller.onObservation("s1", reasoningOnly(4, 61_000));
+	assert.equal(after.reasoningFired, false);
+	assert.equal(after.reasoningRunCount, 1, "窗口已清空，重新从 1 计");
+	assert.equal(events.filter((e) => e.n === EVT.REASONING_STALL).length, 1);
+	// 重新累计到达标 → 可再次报（证明清空重计，而非永久静默）
+	controller.onObservation("s1", reasoningOnly(5, 91_000));
+	const refired = controller.onObservation("s1", reasoningOnly(6, 121_000));
+	assert.equal(refired.reasoningFired, true);
+	assert.equal(events.filter((e) => e.n === EVT.REASONING_STALL).length, 2);
+	assert.equal(reasoningCalls.length, 2);
+});
+
+test("步骤4-④ reasoning 窗口内出现 artifact/text/纯空转 → 清空窗口，不达标不报", () => {
+	const { events, reasoningCalls, controller } = reasoningHarness();
+	controller.onObservation("s1", reasoningOnly(1, 0));
+	controller.onObservation("s1", reasoningOnly(2, 30_000)); // count=2
+	// 中途出现产物：中断连续 reasoning-only 序列
+	controller.onObservation("s1", { turn: 1, step: 3, ts: 60_000, hasText: false, textLen: 0, reasoningLen: 0, hasArtifact: true });
+	// 之后再补 2 个 reasoning-only（新序列 count=2 < K=3）→ 不报
+	controller.onObservation("s1", reasoningOnly(4, 90_000));
+	const rArtifact = controller.onObservation("s1", reasoningOnly(5, 120_000));
+	assert.equal(rArtifact.reasoningFired, false);
+	assert.equal(rArtifact.reasoningRunCount, 2);
+	// text 同样清空
+	controller.onObservation("s1", { turn: 1, step: 6, ts: 130_000, hasText: true, textLen: 10, reasoningLen: 0, hasArtifact: false });
+	controller.onObservation("s1", reasoningOnly(7, 160_000));
+	const rText = controller.onObservation("s1", reasoningOnly(8, 190_000));
+	assert.equal(rText.reasoningFired, false);
+	assert.equal(rText.reasoningRunCount, 2);
+	// 纯 barren（无 text/产物/reasoning）也中断 reasoning-only 连续序列
+	controller.onObservation("s1", { turn: 1, step: 9, ts: 200_000, hasText: false, textLen: 0, reasoningLen: 0, hasArtifact: false });
+	controller.onObservation("s1", reasoningOnly(10, 230_000));
+	const rBarren = controller.onObservation("s1", reasoningOnly(11, 260_000));
+	assert.equal(rBarren.reasoningFired, false);
+	assert.equal(rBarren.reasoningRunCount, 2);
+	assert.equal(events.filter((e) => e.n === EVT.REASONING_STALL).length, 0);
+	assert.equal(reasoningCalls.length, 0);
+});
+
+test("步骤4：真人 user 消息 / 正式 new entry 复位 reasoning 窗口", () => {
+	const { events, controller } = reasoningHarness();
+	controller.onObservation("s1", reasoningOnly(1, 0));
+	controller.onObservation("s1", reasoningOnly(2, 30_000)); // count=2
+	controller.onUserMessage("s1");
+	controller.onObservation("s1", reasoningOnly(3, 60_000));
+	const rUser = controller.onObservation("s1", reasoningOnly(4, 90_000)); // 复位后仅 count=2
+	assert.equal(rUser.reasoningFired, false);
+	assert.equal(rUser.reasoningRunCount, 2);
+	// 正式结论 new entry 同样复位
+	controller.onEntries("s1", [newEntry(5)]);
+	controller.onObservation("s1", reasoningOnly(6, 120_000));
+	const rEntry = controller.onObservation("s1", reasoningOnly(7, 150_000));
+	assert.equal(rEntry.reasoningFired, false);
+	assert.equal(rEntry.reasoningRunCount, 2);
+	assert.equal(events.filter((e) => e.n === EVT.REASONING_STALL).length, 0);
+});
+
+
+test("改进①：enableLexicalStallCount=true 时词法重复计入升级（code=lexical-stall-2）", async () => {
+	const denyCalls = [];
+	const { events, controller } = harness({
+		settings: { enableLexicalStallCount: true, enableStall2Deny: true },
+		getL2: () => ({ denyToolCategory: async (...a) => { denyCalls.push(a); return { accepted: true, expiresAtStep: 99 }; } })
+	});
+	const r = controller.onEntries("s1", [lexDup(1), lexDup(2), lexDup(3)]); // t1=3 → level 1
+	assert.equal(r.level, 1);
+	assert.ok(r.warningText.includes("词法复读"), "词法 origin 文案应标识词法复读");
+	const r2 = controller.onEntries("s1", [lexDup(4), lexDup(5), lexDup(6)]); // t2=6 → level 2
+	assert.equal(r2.level, 2);
+	const s = stalls(events).map((e) => e.p);
+	assert.equal(s[1].level, 2);
+	assert.equal(s[1].code, "lexical-stall-2", "词法升级 code 区别于语义");
+	await settle();
+	assert.equal(denyCalls.length, 1);
+	assert.equal(denyCalls[0][2].code, "lexical-stall-2", "deny code 同步词法来源");
+	assert.equal(interventions(events).filter((e) => e.p.action === "deny-read").length, 1);
+});
+
+test("改进①：enableLexicalStallCount=true 时 LEXICAL_REPEAT 仍发且带 lexicalCount", () => {
+	const { events, controller } = harness({ settings: { enableLexicalStallCount: true } });
+	controller.onEntries("s1", [lexDup(1), lexDup(2), lexDup(3)]);
+	const lr = events.filter((e) => e.n === EVT.LEXICAL_REPEAT);
+	assert.equal(lr.length, 3);
+	assert.equal(lr[2].p.lexicalCount, 3);
+});
+
+test("改进④：lexicalStallSteps=3 时连续 3 条词法重复发 LEXICAL_STALL（独立警告，不升级）", () => {
+	const { events, controller } = harness({ settings: { lexicalStallSteps: 3 } });
+	const r = controller.onEntries("s1", [lexDup(1), lexDup(2), lexDup(3)]);
+	assert.equal(r.level, 0, "独立警告路径不升级");
+	assert.equal(stalls(events).length, 0);
+	const ls = events.filter((e) => e.n === EVT.LEXICAL_STALL);
+	assert.equal(ls.length, 1);
+	assert.equal(ls[0].p.level, 1);
+	assert.equal(ls[0].p.lexicalCount, 3);
+	assert.ok(ls[0].p.warning.includes("词法复读停滞"));
+	// 同一连续序列不重复发
+	controller.onEntries("s1", [lexDup(4)]);
+	assert.equal(events.filter((e) => e.n === EVT.LEXICAL_STALL).length, 1);
+});
+
+test("改进④：语义重复打断词法连续序列（lexicalCount 清零后重新计数）", () => {
+	const { events, controller } = harness({ settings: { lexicalStallSteps: 3 } });
+	controller.onEntries("s1", [lexDup(1), lexDup(2), semDup(3), lexDup(4), lexDup(5)]);
+	assert.equal(events.filter((e) => e.n === EVT.LEXICAL_STALL).length, 0, "词法序列被语义重复打断");
+	const r = controller.onEntries("s1", [lexDup(6)]);
+	assert.equal(events.filter((e) => e.n === EVT.LEXICAL_STALL).length, 1, "打断后重新累计满 3 条");
+	assert.equal(r.level, 0);
+});
+
+test("改进④：new entry 复位词法计数（发过一次后 new 再来序列可再发）", () => {
+	const { events, controller } = harness({ settings: { lexicalStallSteps: 2 } });
+	controller.onEntries("s1", [lexDup(1), lexDup(2)]);
+	assert.equal(events.filter((e) => e.n === EVT.LEXICAL_STALL).length, 1);
+	controller.onEntries("s1", [newEntry(3)]);
+	controller.onEntries("s1", [lexDup(4), lexDup(5)]);
+	assert.equal(events.filter((e) => e.n === EVT.LEXICAL_STALL).length, 2, "new 复位后新序列可再次发");
+});
+
+test("改进①+④ 同开：词法升级与独立警告互不干扰", async () => {
+	const denyCalls = [];
+	const { events, controller } = harness({
+		settings: { enableLexicalStallCount: true, lexicalStallSteps: 2, enableStall2Deny: true },
+		getL2: () => ({ denyToolCategory: async (...a) => { denyCalls.push(a); return { accepted: true, expiresAtStep: 99 }; } })
+	});
+	const r = controller.onEntries("s1", [lexDup(1), lexDup(2), lexDup(3), lexDup(4), lexDup(5), lexDup(6)]);
+	assert.equal(r.level, 2);
+	const ls = events.filter((e) => e.n === EVT.LEXICAL_STALL);
+	assert.equal(ls.length, 1, "独立警告在第 2 条已触发");
+	const s = stalls(events);
+	assert.equal(s.length, 2, "level1 + level2 各一次");
+	assert.equal(s[0].p.code, null, "level1 code 为 null（与语义一致）");
+	assert.equal(s[1].p.code, "lexical-stall-2");
+	await settle();
+	assert.equal(denyCalls.length, 1);
+	assert.equal(denyCalls[0][2].code, "lexical-stall-2");
+});
+
+test("改进②：默认 enableLexicalStallCount=false / lexicalStallSteps=0 行为不变（回归锚点）", () => {
+	const { events, controller } = harness();
+	const r = controller.onEntries("s1", [lexDup(1), lexDup(2), lexDup(3)]);
+	assert.equal(r.level, 0);
+	assert.equal(stalls(events).length, 0);
+	assert.equal(events.filter((e) => e.n === EVT.LEXICAL_REPEAT).length, 3);
+	assert.equal(events.filter((e) => e.n === EVT.LEXICAL_STALL).length, 0);
+	assert.equal(controller.getSnapshot("s1").stallCount, 3);
+	assert.equal(controller.getSnapshot("s1").lexicalCount, 3);
+});

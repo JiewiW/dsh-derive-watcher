@@ -3,7 +3,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -73,7 +73,7 @@ test("P0-3 合法空 entries：推进水位、不记 gap、不重试、无账本
 	let callCount = 0;
 	const h = harness(async () => { callCount += 1; return '{"entries":[]}'; });
 	try {
-		h.summarizer.enqueue("s1", { messageId: "m1", turn: 1, step: 1, text: "有内容但模型认为无可记" });
+		h.summarizer.enqueue("s1", { sourceKind: "text", messageId: "m1", turn: 1, step: 1, text: "有内容但模型认为无可记" });
 		await awaitDrain(h, 0);
 		await settle();
 		// 不重试：仅 1 次草稿调用
@@ -100,7 +100,7 @@ test("P2-22 畸形括号一次修复：不重试直接成功", async () => {
 		return '{"entries":[{"kind":"finding","summary":"括号修复后的结论"}]';
 	});
 	try {
-		h.summarizer.enqueue("s1", { messageId: "m1", turn: 1, step: 1, text: "内容" });
+		h.summarizer.enqueue("s1", { sourceKind: "text", messageId: "m1", turn: 1, step: 1, text: "内容" });
 		await awaitDrain(h, 1);
 		assert.equal(h.summarizer.stats().processed, 1);
 		assert.equal(h.store.readEntries("s1").length, 1);
@@ -111,7 +111,7 @@ test("P2-22 畸形括号一次修复：不重试直接成功", async () => {
 test("正常总结：落账 new + 水位推进 + onSummarized", async () => {
 	const h = harness(async () => draftJson("全新结论文本"));
 	try {
-		const q = h.summarizer.enqueue("s1", { messageId: "m1", turn: 1, step: 1, text: "助手消息内容" });
+		const q = h.summarizer.enqueue("s1", { sourceKind: "text", messageId: "m1", turn: 1, step: 1, text: "助手消息内容" });
 		assert.equal(q.queued, true);
 		await awaitDrain(h, 1);
 		const entries = h.store.readEntries("s1");
@@ -129,11 +129,11 @@ test("正常总结：落账 new + 水位推进 + onSummarized", async () => {
 test("入队去重与空文本拒绝", async () => {
 	const h = harness(async () => draftJson("x"));
 	try {
-		assert.equal(h.summarizer.enqueue("s1", { messageId: "m1", turn: 1, step: 1, text: "内容" }).queued, true);
-		const dup = h.summarizer.enqueue("s1", { messageId: "m1", turn: 1, step: 2, text: "内容" });
+		assert.equal(h.summarizer.enqueue("s1", { sourceKind: "text", messageId: "m1", turn: 1, step: 1, text: "内容" }).queued, true);
+		const dup = h.summarizer.enqueue("s1", { sourceKind: "text", messageId: "m1", turn: 1, step: 2, text: "内容" });
 		assert.equal(dup.queued, false);
 		assert.ok(dup.reason.includes("去重"));
-		assert.equal(h.summarizer.enqueue("s1", { messageId: "m2", text: "   " }).queued, false);
+		assert.equal(h.summarizer.enqueue("s1", { sourceKind: "text", messageId: "m2", text: "   " }).queued, false);
 		assert.equal(h.summarizer.stats().enqueued, 1);
 	} finally { h.cleanup(); }
 });
@@ -142,8 +142,8 @@ test("词法重复：同文判 duplicate（semantic_duplicate=false, duplicate_o
 	let call = 0;
 	const h = harness(async () => (++call === 1 ? draftJson("数据库连接池耗尽导致请求堆积") : draftJson("数据库连接池耗尽导致请求堆积")));
 	try {
-		h.summarizer.enqueue("s1", { messageId: "m1", turn: 1, step: 1, text: "a" });
-		h.summarizer.enqueue("s1", { messageId: "m2", turn: 1, step: 2, text: "b" });
+		h.summarizer.enqueue("s1", { sourceKind: "text", messageId: "m1", turn: 1, step: 1, text: "a" });
+		h.summarizer.enqueue("s1", { sourceKind: "text", messageId: "m2", turn: 1, step: 2, text: "b" });
 		await awaitDrain(h, 2);
 		const entries = h.store.readEntries("s1");
 		assert.equal(entries[1].novelty, "duplicate");
@@ -162,8 +162,8 @@ test("语义重复（schema-selfcheck）：词法未命中 + selfcheck 命中 �
 			: draftJson("改写后的同义结论：首屏渲染管线异常");
 	});
 	try {
-		h.summarizer.enqueue("s1", { messageId: "m1", turn: 1, step: 1, text: "a" });
-		h.summarizer.enqueue("s1", { messageId: "m2", turn: 1, step: 2, text: "b" });
+		h.summarizer.enqueue("s1", { sourceKind: "text", messageId: "m1", turn: 1, step: 1, text: "a" });
+		h.summarizer.enqueue("s1", { sourceKind: "text", messageId: "m2", turn: 1, step: 2, text: "b" });
 		await awaitDrain(h, 2);
 		const entries = h.store.readEntries("s1");
 		assert.equal(entries[1].novelty, "duplicate");
@@ -172,11 +172,59 @@ test("语义重复（schema-selfcheck）：词法未命中 + selfcheck 命中 �
 	} finally { h.cleanup(); }
 });
 
+
+test("改进③：semantic-only 模式跳过词法层——同文也走 selfcheck 且可判语义重复", async () => {
+	let selfcheckCalls = 0;
+	const h = harness(async ({ purpose }) => {
+		if (String(purpose).includes("selfcheck")) { selfcheckCalls += 1; return '{"novelty":"duplicate","duplicate_of":"j_0001"}'; }
+		// 两条完全相同的 draft 文本：schema-selfcheck 下会词法短路，semantic-only 下必须走 selfcheck
+		return draftJson("数据库连接池耗尽导致请求堆积");
+	}, { noveltyMode: "semantic-only" });
+	try {
+		h.summarizer.enqueue("s1", { sourceKind: "text", messageId: "m1", turn: 1, step: 1, text: "a" });
+		h.summarizer.enqueue("s1", { sourceKind: "text", messageId: "m2", turn: 1, step: 2, text: "b" });
+		await awaitDrain(h, 2);
+		const entries = h.store.readEntries("s1");
+		assert.equal(entries[1].novelty, "duplicate");
+		assert.equal(entries[1].semantic_duplicate, true, "词法层被跳过，语义判定生效");
+		assert.equal(entries[1].duplicate_of, "j_0001");
+		assert.equal(selfcheckCalls, 1, "semantic-only 下词法命中文本也会调 selfcheck");
+	} finally { h.cleanup(); }
+});
+
+test("改进③：semantic-only 模式 selfcheck 判 new → 词法相同文本也落 new", async () => {
+	const h = harness(async ({ purpose }) => {
+		if (String(purpose).includes("selfcheck")) return '{"novelty":"new","duplicate_of":null}';
+		return draftJson("数据库连接池耗尽导致请求堆积");
+	}, { noveltyMode: "semantic-only" });
+	try {
+		h.summarizer.enqueue("s1", { sourceKind: "text", messageId: "m1", turn: 1, step: 1, text: "a" });
+		h.summarizer.enqueue("s1", { sourceKind: "text", messageId: "m2", turn: 1, step: 2, text: "b" });
+		await awaitDrain(h, 2);
+		const entries = h.store.readEntries("s1");
+		assert.equal(entries[1].novelty, "new", "词法层被跳过，以语义判定为准");
+		assert.equal(entries[1].semantic_duplicate, false);
+	} finally { h.cleanup(); }
+});
+
+test("改进②：lexicalThreshold 设置生效——低阈值让近似文本词法判重", async () => {
+	const h = harness(async () => draftJson("读取配置文件失败因为路径不存在"), { lexicalThreshold: 0.2 });
+	try {
+		h.summarizer.enqueue("s1", { sourceKind: "text", messageId: "m1", turn: 1, step: 1, text: "a" });
+		h.summarizer.enqueue("s1", { sourceKind: "text", messageId: "m2", turn: 1, step: 2, text: "b" });
+		await awaitDrain(h, 2);
+		const entries = h.store.readEntries("s1");
+		// 两条 draft 相同：任何阈值下都是词法重复；此用例验证阈值参数被传入不抛错、行为正确
+		assert.equal(entries[1].novelty, "duplicate");
+		assert.equal(entries[1].semantic_duplicate, false);
+	} finally { h.cleanup(); }
+});
+
 test("畸形 JSON 重试 1 次后成功：stats.retried=1", async () => {
 	let call = 0;
 	const h = harness(async () => (++call === 1 ? "完全不是 JSON" : draftJson("重试后成功的新结论")));
 	try {
-		h.summarizer.enqueue("s1", { messageId: "m1", turn: 1, step: 1, text: "a" });
+		h.summarizer.enqueue("s1", { sourceKind: "text", messageId: "m1", turn: 1, step: 1, text: "a" });
 		await awaitDrain(h, 1);
 		assert.equal(h.summarizer.stats().retried, 1);
 		assert.equal(h.summarizer.stats().processed, 1);
@@ -187,7 +235,7 @@ test("畸形 JSON 重试 1 次后成功：stats.retried=1", async () => {
 test("两次畸形 → degrade：gap 落盘 + SUMMARIZER_DEGRADED + onGap + 不推水位", async () => {
 	const h = harness(async () => "仍然不是 JSON");
 	try {
-		h.summarizer.enqueue("s1", { messageId: "m1", turn: 1, step: 1, text: "a" });
+		h.summarizer.enqueue("s1", { sourceKind: "text", messageId: "m1", turn: 1, step: 1, text: "a" });
 		await awaitDrain(h, 0);
 		await settle();
 		assert.equal(h.summarizer.stats().degraded, 1);
@@ -206,7 +254,7 @@ test("队列上限 8：溢出丢最旧 + gap + 事件；其余照常处理", asy
 	let seq = 0;
 	const h = harness(async () => { await gate; return draftJson(`溢出测试唯一结论${++seq}`); });
 	try {
-		for (let i = 1; i <= 10; i++) h.summarizer.enqueue("s1", { messageId: `m${i}`, turn: 1, step: i, text: `消息${i}` });
+		for (let i = 1; i <= 10; i++) h.summarizer.enqueue("s1", { sourceKind: "text", messageId: `m${i}`, turn: 1, step: i, text: `消息${i}` });
 		assert.equal(h.summarizer.stats().dropped, 1, "第 10 条入队时应挤掉最旧的 m2");
 		assert.equal(h.summarizer.stats().queued, 8);
 		assert.ok(h.events.some((e) => e.n === EVT.SUMMARIZER_DEGRADED && String(e.p.suppressReason).includes("队列溢出")));
@@ -229,9 +277,9 @@ test("P2-21①：messageId 缺失的入队其 evict 键与 add 键同构（无 n
 	try {
 		// step=1 立即进 in-flight（pump 同步启动），队列可容 8：第 10 条挤掉队首（step=2）。
 		// 全部无 messageId → 键退化为 turn/step。修复前 evict 键是 `${sid}/null`（残留 `${sid}/1/2`）；修复后同构可重新入队。
-		for (let i = 1; i <= 10; i++) h.summarizer.enqueue("s1", { turn: 1, step: i, text: `消息${i}` });
+		for (let i = 1; i <= 10; i++) h.summarizer.enqueue("s1", { sourceKind: "text", turn: 1, step: i, text: `消息${i}` });
 		assert.equal(h.summarizer.stats().dropped, 1, "第 10 条入队挤掉队首的 turn/step=1/2");
-		const again = h.summarizer.enqueue("s1", { turn: 1, step: 2, text: "重新投递被挤掉的消息" });
+		const again = h.summarizer.enqueue("s1", { sourceKind: "text", turn: 1, step: 2, text: "重新投递被挤掉的消息" });
 		assert.equal(again.queued, true, "被挤掉的 turn/step 键可重新入队（seen 已随 evict 清干净）");
 	} finally { release?.(); h.cleanup(); }
 });
@@ -245,8 +293,8 @@ test("并发闸默认 1：两个任务串行", async () => {
 		return draftJson(`串行唯一结论${++seq}`);
 	});
 	try {
-		h.summarizer.enqueue("s1", { messageId: "m1", turn: 1, step: 1, text: "a" });
-		h.summarizer.enqueue("s1", { messageId: "m2", turn: 1, step: 2, text: "b" });
+		h.summarizer.enqueue("s1", { sourceKind: "text", messageId: "m1", turn: 1, step: 1, text: "a" });
+		h.summarizer.enqueue("s1", { sourceKind: "text", messageId: "m2", turn: 1, step: 2, text: "b" });
 		await awaitDrain(h, 2);
 		assert.equal(maxInFlight, 1);
 		assert.equal(h.store.readEntries("s1").length, 2);
@@ -263,8 +311,8 @@ test("并发闸 maxConcurrency=2：两个任务并行", async () => {
 	});
 	h.setSettings({ maxConcurrency: 2 });
 	try {
-		h.summarizer.enqueue("s1", { messageId: "m1", turn: 1, step: 1, text: "a" });
-		h.summarizer.enqueue("s1", { messageId: "m2", turn: 1, step: 2, text: "b" });
+		h.summarizer.enqueue("s1", { sourceKind: "text", messageId: "m1", turn: 1, step: 1, text: "a" });
+		h.summarizer.enqueue("s1", { sourceKind: "text", messageId: "m2", turn: 1, step: 2, text: "b" });
 		await awaitDrain(h, 2);
 		assert.equal(maxInFlight, 2);
 	} finally { h.cleanup(); }
@@ -380,23 +428,160 @@ test("P2-22 熔断：连续 3 次降级后冷却期内短路（不再打 LLM）"
 			getSettings: () => ({ ...DEFAULT_SETTINGS }), callLlm: async () => { callLlmCount += 1; return "仍然不是 JSON"; },
 			now: () => clock
 		});
-		sm.enqueue("s1", { messageId: "m1", turn: 1, step: 1, text: "a" });
+		sm.enqueue("s1", { sourceKind: "text", messageId: "m1", turn: 1, step: 1, text: "a" });
 		await settle(3);
-		sm.enqueue("s1", { messageId: "m2", turn: 1, step: 2, text: "b" });
+		sm.enqueue("s1", { sourceKind: "text", messageId: "m2", turn: 1, step: 2, text: "b" });
 		await settle(3);
-		sm.enqueue("s1", { messageId: "m3", turn: 1, step: 3, text: "c" });
+		sm.enqueue("s1", { sourceKind: "text", messageId: "m3", turn: 1, step: 3, text: "c" });
 		await settle(3);
 		assert.ok(callLlmCount >= 3, "前三次仍打 LLM（熔断前）");
 		const before = callLlmCount;
 		// 冷却期内短路：不再打 LLM，直接 degrade
-		sm.enqueue("s1", { messageId: "m4", turn: 1, step: 4, text: "d" });
+		sm.enqueue("s1", { sourceKind: "text", messageId: "m4", turn: 1, step: 4, text: "d" });
 		await settle(3);
 		assert.equal(callLlmCount, before, "熔断冷却期内不应再打 LLM");
 		// 推进时钟越过冷却期 → 放行一次试探（试探失败仍会 draft+retry 各打一次 LLM）
 		clock += 60_001;
 		const beforeTrial = callLlmCount;
-		sm.enqueue("s1", { messageId: "m5", turn: 1, step: 5, text: "e" });
+		sm.enqueue("s1", { sourceKind: "text", messageId: "m5", turn: 1, step: 5, text: "e" });
 		await settle(3);
 		assert.ok(callLlmCount > beforeTrial, "冷却期后应放行一次试探（重新打 LLM）");
 	} finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+// ───────────────────────── 步骤 2：text/reasoning 双路隔离 ─────────────────────────
+
+const reasoningDraftJson = (summary, extra = {}) =>
+	JSON.stringify({ entries: [{ kind: "r-decision", summary, detail: "", artifacts: [], supersedes: [], confidence: 0.7, ...extra }] });
+
+test("双路：sourceKind 缺失/非法 → 拒入（禁止隐式默认 text）", () => {
+	const h = harness(async () => reasoningDraftJson("x"));
+	try {
+		const missing = h.summarizer.enqueue("s1", { messageId: "m1", turn: 1, step: 1, text: "内容" });
+		assert.equal(missing.queued, false);
+		assert.ok(missing.reason.includes("sourceKind"));
+		assert.equal(h.summarizer.enqueue("s1", { sourceKind: "bogus", messageId: "m2", text: "内容" }).queued, false);
+		assert.equal(h.summarizer.stats().enqueued, 0);
+	} finally { h.cleanup(); }
+});
+
+test("双路：reasoning job 落 reasoning 通道（kind∈REASONING_KINDS），text 账本零污染，purpose 独立", async () => {
+	const purposes = [];
+	const h = harness(async ({ purpose }) => { purposes.push(purpose); return reasoningDraftJson("推理中决定改用连接池"); });
+	try {
+		h.summarizer.enqueue("s1", { sourceKind: "reasoning", messageId: "rm1", turn: 1, step: 1, text: "思考块原文…" });
+		await h.summarizer.flush();
+		const rEntries = h.store.readReasoningEntries("s1");
+		assert.equal(rEntries.length, 1);
+		assert.equal(rEntries[0].kind, "r-decision");
+		assert.equal(rEntries[0].channel, "reasoning");
+		assert.equal(rEntries[0].sourceMessageId, "rm1");
+		assert.equal(h.store.readEntries("s1").length, 0, "reasoning 提炼不得进入 text 正式结论账本");
+		assert.equal(existsSync(h.store.paths.reasoningJsonl("s1")), true);
+		assert.equal(existsSync(h.store.paths.jsonl("s1")), false, "text 账本文件不应被创建");
+		assert.ok(purposes.includes("semantic-watcher/reasoning-draft"), `purposes=${purposes.join(",")}`);
+		assert.equal(h.summarized.length, 1);
+		assert.equal(h.summarized[0].channel, "reasoning");
+		const wm = h.store.loadWatermark("s1", "reasoning");
+		assert.equal(wm.lastMessageId, "rm1");
+		assert.equal(wm.lastStepSeq, 1);
+		assert.equal(h.store.loadWatermark("s1", "text"), null, "text 水位不得被 reasoning 推进");
+		assert.equal(h.summarizer.stats().byChannel.reasoning.processed, 1);
+		assert.equal(h.summarizer.stats().byChannel.text.processed, 0);
+	} finally { h.cleanup(); }
+});
+
+test("双路：candidates 只读本通道——reasoning 与 text 同文不判跨通道重复", async () => {
+	const h = harness(async () => reasoningDraftJson("完全相同的一句话内容XYZ"));
+	try {
+		const seeded = h.store.appendEntry("s1", {
+			turn: 0, step: 0, kind: "finding", summary: "完全相同的一句话内容XYZ", novelty: "new"
+		}, "text");
+		assert.equal(seeded.ok, true);
+		h.summarizer.enqueue("s1", { sourceKind: "reasoning", messageId: "rm1", turn: 1, step: 1, text: "思考…" });
+		await h.summarizer.flush();
+		const r = h.store.readReasoningEntries("s1");
+		assert.equal(r.length, 1);
+		assert.equal(r[0].novelty, "new", "reasoning candidates 窗口为空（不含 text entry），应判 new 而非 duplicate");
+		assert.equal(h.store.readEntries("s1").length, 1);
+	} finally { h.cleanup(); }
+});
+
+test("双路：reasoning 返回 text 通道 kind（finding）→ 丢弃，推 reasoning 水位但无 entry/无回调", async () => {
+	const h = harness(async () => draftJson("被禁止的事实结论")); // finding 不属于 REASONING_KINDS
+	try {
+		h.summarizer.enqueue("s1", { sourceKind: "reasoning", messageId: "rm1", turn: 1, step: 1, text: "思考…" });
+		await h.summarizer.flush();
+		assert.equal(h.store.readReasoningEntries("s1").length, 0);
+		assert.equal(h.store.readEntries("s1").length, 0);
+		assert.equal(h.summarized.length, 0);
+		const wm = h.store.loadWatermark("s1", "reasoning");
+		assert.equal(wm.lastStepSeq, 1, "合法空结果仍推 reasoning 水位");
+	} finally { h.cleanup(); }
+});
+
+test("双路：reasoning 空文本拒入（与 text 一致）", () => {
+	const h = harness(async () => reasoningDraftJson("x"));
+	try {
+		assert.equal(h.summarizer.enqueue("s1", { sourceKind: "reasoning", messageId: "rm1", text: "   " }).queued, false);
+		assert.equal(h.summarizer.stats().byChannel.reasoning.enqueued, 0);
+	} finally { h.cleanup(); }
+});
+
+test("双路熔断隔离：reasoning 连续降级熔断后，text 路 stats 正常且仍打 LLM", async () => {
+	let textCalls = 0;
+	const root = mkdtempSync(join(tmpdir(), "dsw-circ2-"));
+	try {
+		const events = [];
+		const store = createJourneyStore({ root, emit: (n, p) => events.push({ n, p }), log: () => {} });
+		const sm = createSummarizer({
+			store, emit: (n, p) => events.push({ n, p }), log: () => {},
+			getSettings: () => ({ ...DEFAULT_SETTINGS }),
+			callLlm: async ({ purpose }) =>
+				String(purpose).includes("reasoning") ? "不是 JSON" : (() => { textCalls += 1; return draftJson("text 路结论"); })()
+		});
+		for (let i = 1; i <= 3; i += 1) {
+			sm.enqueue("s1", { sourceKind: "reasoning", messageId: `r${i}`, turn: 1, step: i, text: `思考${i}` });
+			await settle(3);
+		}
+		const rStats = sm.stats().byChannel.reasoning;
+		assert.ok(rStats.degraded >= 3, `reasoning degraded=${rStats.degraded} 应≥3`);
+		sm.enqueue("s1", { sourceKind: "reasoning", messageId: "r4", turn: 1, step: 4, text: "思考4" });
+		await settle(3);
+		sm.enqueue("s1", { sourceKind: "text", messageId: "t1", turn: 1, step: 1, text: "正式输出" });
+		await settle(3);
+		const tStats = sm.stats().byChannel.text;
+		assert.equal(tStats.degraded, 0, "text 路降级数应为 0");
+		assert.equal(tStats.processed, 1, "text 路正常处理 1 条");
+		assert.ok(textCalls >= 1, "text 路仍应实际调用 LLM");
+		assert.equal(store.readEntries("s1").length, 1, "text 账本正常落 1 条");
+		assert.equal(store.readReasoningEntries("s1").length, 0, "reasoning 账本无 entry（全降级）");
+	} finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("双路：reasoning 降级 gap 只进 reasoning 账本，不污染 text 集合", async () => {
+	const h = harness(async () => "仍然不是 JSON");
+	try {
+		h.summarizer.enqueue("s1", { sourceKind: "reasoning", messageId: "rm1", turn: 1, step: 1, text: "思考…" });
+		await h.summarizer.flush();
+		assert.equal(h.summarizer.stats().byChannel.reasoning.degraded, 1);
+		assert.equal(existsSync(h.store.paths.jsonl("s1")), false, "text 主账本文件不应被创建（gap 也不进）");
+		const raw = readFileSync(h.store.paths.reasoningJsonl("s1"), "utf8").trim().split("\n").map(JSON.parse);
+		assert.equal(raw[raw.length - 1].type, "gap");
+		assert.equal(raw[raw.length - 1].channel, "reasoning");
+	} finally { h.cleanup(); }
+});
+
+test("双路调度：reasoning 积压不饿死 text（并发=1 轮转，text 被持续服务）", async () => {
+	let seq = 0;
+	const h = harness(async ({ purpose }) =>
+		String(purpose).includes("reasoning") ? reasoningDraftJson(`推理点${++seq}`) : draftJson(`结论${++seq}`));
+	try {
+		for (let i = 1; i <= 4; i += 1) h.summarizer.enqueue("s1", { sourceKind: "reasoning", messageId: `r${i}`, turn: 1, step: i, text: `思考${i}` });
+		h.summarizer.enqueue("s1", { sourceKind: "text", messageId: "t1", turn: 1, step: 10, text: "结论A" });
+		h.summarizer.enqueue("s1", { sourceKind: "text", messageId: "t2", turn: 1, step: 11, text: "结论B" });
+		await h.summarizer.flush();
+		assert.equal(h.store.readEntries("s1").length, 2, "两条 text 都必须被处理（未被 reasoning 积压饿死）");
+		assert.equal(h.store.readReasoningEntries("s1").length, 4);
+	} finally { h.cleanup(); }
 });

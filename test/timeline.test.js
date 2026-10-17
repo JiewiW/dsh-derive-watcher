@@ -253,6 +253,117 @@ test("同 ts 并列：intervention 排在 journey 之前（稳定优先级）", 
 	} finally { dispose5(); }
 });
 
+// ── gap 合并降噪（coalesceGaps）：连续同 grade 合成一张卡 ──
+const GAP_LEDGER = "gapm";
+writeFileSync(join(tempRoot, "journey", `${GAP_LEDGER}.jsonl`), [
+	// 3 条连续 timeout（合并为一张卡）+ 1 条 empty（grade 不同，不并入）+ 1 条无 grade 老数据（不合并）
+	JSON.stringify({ type: "gap", ts: iso("01"), sessionId: GAP_LEDGER, grade: "timeout", reason: "总结器调用超时（aborted），跳过并记 gap", turn: 1, step: 2 }),
+	JSON.stringify({ type: "gap", ts: iso("02"), sessionId: GAP_LEDGER, grade: "timeout", reason: "总结器调用超时（aborted），跳过并记 gap", turn: 1, step: 3 }),
+	JSON.stringify({ type: "gap", ts: iso("03"), sessionId: GAP_LEDGER, grade: "timeout", reason: "总结器调用超时（aborted），跳过并记 gap", turn: 2, step: 4 }),
+	JSON.stringify({ type: "gap", ts: iso("04"), sessionId: GAP_LEDGER, grade: "empty", reason: "总结器空回复，跳过并记 gap", turn: 2, step: 5 }),
+	JSON.stringify({ type: "gap", ts: iso("05"), sessionId: GAP_LEDGER, reason: "队列溢出丢弃最旧", turn: 2, step: 6 })
+].join("\n") + "\n");
+
+test("gap 合并：连续同 grade 合成一张卡，counts 仍按真实条数统计", async () => {
+	const ctx = makeCtx({ sessionQuery: makeQuery(), llm: { stream: async function* () {} } });
+	const dispose = apply(ctx, undefined);
+	try {
+		const route = findRoute(ctx.routes, "/plugins/derive-watcher/timeline");
+		const res = fakeRes();
+		await route.handler({ method: "GET", url: `/plugins/derive-watcher/timeline?sessionId=${GAP_LEDGER}` }, res);
+		assert.equal(res.status, 200);
+		const gapItems = res.body.items.filter((i) => i.source === "gap");
+		assert.equal(gapItems.length, 3, "5 条 gap 合并为 3 张卡：timeout×3→1、empty×1、无 grade×1");
+		assert.equal(res.body.counts.gap, 5, "counts 按真实条数，不受合并影响");
+		// 合并卡：3 条连续 timeout
+		const merged = gapItems.find((i) => i.data?.coalesced);
+		assert.ok(merged, "存在合并卡");
+		assert.equal(merged.grade, "timeout");
+		assert.equal(merged.title, "总结跳过 3 次：调用超时");
+		assert.equal(merged.data.coalesced.count, 3);
+		assert.equal(merged.data.coalesced.firstTs, iso("03"), "合并卡挂载在最新一条上，firstTs/lastTs 覆盖整段区间");
+		assert.equal(merged.data.coalesced.lastTs, iso("01"), "降序遍历：合并卡锚定最新一条，lastTs 收敛到最旧一条");
+		assert.deepEqual(merged.data.coalesced.turns, [2, 1, 1], "turns 按降序收集");
+		assert.ok(merged.summary.includes("3 次连续同类跳过") && merged.summary.includes("最近一次："), `合并摘要：${merged.summary}`);
+		// empty 与 timeout 是两回事，各自独立成卡
+		const emptyCard = gapItems.find((i) => i.grade === "empty");
+		assert.equal(emptyCard.title, "总结跳过：模型空回复");
+		assert.equal(emptyCard.data.coalesced, undefined, "grade 不同不合并");
+		// 无 grade 老数据（队列溢出路径）：原样展示，不合并
+		const legacyCard = gapItems.find((i) => i.grade === null);
+		assert.equal(legacyCard.title, "总结跳过（原因未知）");
+		assert.equal(legacyCard.data.coalesced, undefined, "grade 缺失不合并");
+	} finally { dispose(); }
+});
+
+// ── gap 不跨 grade 合并：timeout → empty → timeout 三段各自独立 ──
+const GAP_LEDGER_MIX = "gapx";
+writeFileSync(join(tempRoot, "journey", `${GAP_LEDGER_MIX}.jsonl`), [
+	JSON.stringify({ type: "gap", ts: iso("11"), sessionId: GAP_LEDGER_MIX, grade: "timeout", reason: "总结器调用超时（aborted），跳过并记 gap", turn: 1, step: 1 }),
+	JSON.stringify({ type: "gap", ts: iso("12"), sessionId: GAP_LEDGER_MIX, grade: "empty", reason: "总结器空回复，跳过并记 gap", turn: 1, step: 2 }),
+	JSON.stringify({ type: "gap", ts: iso("13"), sessionId: GAP_LEDGER_MIX, grade: "timeout", reason: "总结器调用超时（aborted），跳过并记 gap", turn: 1, step: 3 })
+].join("\n") + "\n");
+
+test("gap 不跨 grade 合并：timeout→empty→timeout 形成三张独立卡", async () => {
+	const ctx = makeCtx({ sessionQuery: makeQuery(), llm: { stream: async function* () {} } });
+	const dispose = apply(ctx, undefined);
+	try {
+		const route = findRoute(ctx.routes, "/plugins/derive-watcher/timeline");
+		const res = fakeRes();
+		await route.handler({ method: "GET", url: `/plugins/derive-watcher/timeline?sessionId=${GAP_LEDGER_MIX}` }, res);
+		assert.equal(res.status, 200);
+		const gapItems = res.body.items.filter((i) => i.source === "gap");
+		assert.equal(gapItems.length, 3, "两条 timeout 被 empty 隔断，不合成一张");
+		assert.equal(res.body.counts.gap, 3);
+		assert.equal(gapItems.every((i) => i.data?.coalesced === undefined), true, "没有任何卡片被合并");
+		assert.deepEqual(gapItems.map((i) => i.grade), ["timeout", "empty", "timeout"], "ts 降序：13>12>11");
+	} finally { dispose(); }
+});
+
+// ── watcher-event 同类合并：heartbeat 与 injection-skipped 各自不跨 kind 合并 ──
+const WATCHER_LEDGER = "evm";
+writeFileSync(join(tempRoot, "journey", `${WATCHER_LEDGER}.jsonl`), JSON.stringify({
+	type: "entry", ts: iso("01"), sessionId: WATCHER_LEDGER, turn: 1, step: 1, kind: "finding",
+	summary: "一个进展", detail: "", novelty: "new"
+}) + "\n");
+
+const WATCHER_EVENTS_COALESCE = [
+	{ seq: 11, type: "semantic-watcher/heartbeat", time: Date.parse(iso("11")), data: { sessionId: WATCHER_LEDGER, turn: 3, step: 9, ts: iso("11"), queueLen: 2, watermarkStepSeq: 8 } },
+	{ seq: 12, type: "semantic-watcher/heartbeat", time: Date.parse(iso("12")), data: { sessionId: WATCHER_LEDGER, turn: 3, step: 10, ts: iso("12"), queueLen: 2, watermarkStepSeq: 9 } },
+	{ seq: 13, type: "semantic-watcher/heartbeat", time: Date.parse(iso("13")), data: { sessionId: WATCHER_LEDGER, turn: 3, step: 11, ts: iso("13"), queueLen: 2, watermarkStepSeq: 10 } },
+	{ seq: 14, type: "semantic-watcher/injection-skipped", time: Date.parse(iso("14")), data: { sessionId: WATCHER_LEDGER, turn: 3, step: 12, ts: iso("14"), suppressReason: "预算溢出：不可裁剪项已超 token 预算 800" } },
+	{ seq: 15, type: "semantic-watcher/heartbeat", time: Date.parse(iso("15")), data: { sessionId: WATCHER_LEDGER, turn: 3, step: 13, ts: iso("15"), queueLen: 2, watermarkStepSeq: 12 } }
+];
+const WATCHER_RECORDS_LITE_COALESCE = WATCHER_EVENTS_COALESCE.map((e) => ({ sessionId: WATCHER_LEDGER, seq: e.seq, type: e.type, time: e.time, surface: "current" }));
+
+test("watcher-event 合并：连续同类合成一张卡，intervention 与 heartbeat 不混", async () => {
+	const ctx = makeCtx({
+		sessionQuery: { ...makeQuery(), listEvents: async (sid) => sid === WATCHER_LEDGER ? WATCHER_RECORDS_LITE_COALESCE : [], readSession: async (sid) => sid === WATCHER_LEDGER ? { session: { id: sid }, events: WATCHER_EVENTS_COALESCE } : { session: { id: sid }, events: [] }, readTitleSnapshots: async () => [], listSessions: async () => [] },
+		llm: { stream: async function* () {} }
+	});
+	const dispose = apply(ctx, undefined);
+	try {
+		const route = findRoute(ctx.routes, "/plugins/derive-watcher/timeline");
+		const res = fakeRes();
+		await route.handler({ method: "GET", url: `/plugins/derive-watcher/timeline?sessionId=${WATCHER_LEDGER}` }, res);
+		assert.equal(res.status, 200);
+		const eventItems = res.body.items.filter((i) => i.source === "watcher-event");
+		// ts 降序：15 (heartbeat) → 14 (injection-skipped) → 13 → 12 → 11 (heartbeat)
+		// heartbeat 被 injection-skipped 隔断为前 3 后 1 → 两张合并卡 + 一张 injection-skipped → 3 张卡
+		assert.equal(eventItems.length, 3, "heartbeat 被 injection-skipped 隔断为两段，共 heartbeat 合并卡×2 + injection-skipped 卡×1");
+		assert.equal(res.body.counts["watcher-event"], 5, "counts 按真实条数，不受合并影响");
+		const heartbeatCards = eventItems.filter((i) => i.kind === "heartbeat");
+		assert.equal(heartbeatCards.length, 2, "heartbeat 被 injection-skipped 隔断为两段，共 2 张卡");
+		assert.equal(heartbeatCards[0].data?.coalesced, undefined, "最新一段仅 1 条 heartbeat，不合并");
+		assert.equal(heartbeatCards[0].title, "心跳", "单条 heartbeat 保持原始卡片标题");
+		assert.equal(heartbeatCards[1].data?.coalesced?.count, 3, "较早一段 3 条 heartbeat 合成一张");
+		assert.equal(heartbeatCards[1].title, "心跳 3 次");
+		assert.equal(heartbeatCards[1].summary.includes("3 次连续同类事件"), true);
+		assert.equal(eventItems.find((i) => i.kind === "injection-skipped").title, "注入已跳过");
+		assert.equal(eventItems.find((i) => i.kind === "injection-skipped").data?.coalesced, undefined, "injection-skipped 仅 1 条，不合并");
+	} finally { dispose(); }
+});
+
 function fakeRes() {
 	const res = {};
 	res.status = null; res.body = null;

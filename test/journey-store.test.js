@@ -8,8 +8,8 @@ import { mkdtempSync, mkdirSync, rmSync, existsSync, readFileSync, readdirSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-	KINDS, OBSERVATION_KINDS, escapeClosingTags, restoreClosingTags, hasTranscriptionMarker,
-	createJourneyStore, backfillFromSessionMessages
+	KINDS, REASONING_KINDS, CHANNELS, OBSERVATION_KINDS, escapeClosingTags, restoreClosingTags, hasTranscriptionMarker,
+	createJourneyStore, backfillFromSessionMessages, validateEntry
 } from "../lib/journey-store.js";
 
 function freshStore(overrides = {}) {
@@ -272,5 +272,131 @@ test("P2-21⑥：loadWatermark 坏字段/缺失统一返 null", () => {
 		const validRw = store.saveWatermark("ok", { lastMessageId: "m1", lastStepSeq: 3 });
 		assert.equal(validRw, true);
 		assert.equal(store.loadWatermark("ok").lastStepSeq, 3);
+	} finally { cleanup(); }
+});
+
+// ── reasoning 独立通道（步骤1：物理隔离 + 独立水位/计数 + reasoning-stall）──────────
+test("REASONING_KINDS 五类 + CHANNELS 两通道", () => {
+	assert.deepEqual([...REASONING_KINDS], ["r-decision", "r-hypothesis", "r-self-correction", "r-dead-end", "r-plan"]);
+	assert.deepEqual([...CHANNELS], ["text", "reasoning"]);
+	assert.ok(OBSERVATION_KINDS.includes("reasoning-stall"));
+	// 推理 kind 与正式 kind 集合不相交
+	for (const k of REASONING_KINDS) assert.ok(!KINDS.includes(k), `${k} 不得出现在正式 KINDS`);
+});
+
+test("reasoning entry 与 text entry 物理隔离：互不出现在对方 readEntries", () => {
+	const { store, cleanup } = freshStore();
+	try {
+		const rt = store.appendEntry("s1", { turn: 1, step: 1, sourceMessageId: "m1", kind: "finding", summary: "正式结论" }, "text");
+		const rr = store.appendEntry("s1", { turn: 1, step: 1, sourceMessageId: "m1", kind: "r-decision", summary: "推理决策" }, "reasoning");
+		assert.equal(rt.ok, true);
+		assert.equal(rr.ok, true);
+		// 物理文件分离
+		assert.equal(existsSync(store.paths.jsonl("s1")), true);
+		assert.equal(existsSync(store.paths.reasoningJsonl("s1")), true);
+		assert.notEqual(store.paths.jsonl("s1"), store.paths.reasoningJsonl("s1"));
+		// text 通道只读 text
+		const textEntries = store.readEntries("s1");
+		assert.equal(textEntries.length, 1);
+		assert.equal(textEntries[0].kind, "finding");
+		assert.equal(textEntries[0].channel, "text");
+		// reasoning 通道只读 reasoning
+		const reasoningEntries = store.readReasoningEntries("s1");
+		assert.equal(reasoningEntries.length, 1);
+		assert.equal(reasoningEntries[0].kind, "r-decision");
+		assert.equal(reasoningEntries[0].channel, "reasoning");
+		assert.equal(reasoningEntries[0].summary, "推理决策");
+		// 物理落盘文件内容互不串
+		const rawText = readFileSync(store.paths.jsonl("s1"), "utf8");
+		const rawReasoning = readFileSync(store.paths.reasoningJsonl("s1"), "utf8");
+		assert.ok(!rawText.includes("r-decision"), "text 账本不得含 reasoning entry");
+		assert.ok(!rawReasoning.includes('"kind":"finding"'), "reasoning 账本不得含 text entry");
+	} finally { cleanup(); }
+});
+
+test("两通道水位独立：写 reasoning 水位不影响 text 水位，反之亦然", () => {
+	const { store, cleanup } = freshStore();
+	try {
+		store.saveWatermark("s1", { lastMessageId: "rm1", lastStepSeq: 5 }, "reasoning");
+		assert.equal(store.loadWatermark("s1", "text"), null, "reasoning 水位写入后 text 水位仍为 null");
+		const rwm = store.loadWatermark("s1", "reasoning");
+		assert.equal(rwm.lastMessageId, "rm1");
+		assert.equal(rwm.lastStepSeq, 5);
+		// 物理水位文件分离
+		assert.equal(existsSync(store.paths.reasoningWatermark("s1")), true);
+		assert.equal(existsSync(store.paths.watermark("s1")), false);
+		// 再写 text 水位
+		store.saveWatermark("s1", { lastMessageId: "tm9", lastStepSeq: 9 }, "text");
+		assert.equal(store.loadWatermark("s1", "text").lastMessageId, "tm9");
+		assert.equal(store.loadWatermark("s1", "reasoning").lastMessageId, "rm1", "text 水位写入不得覆盖 reasoning 水位");
+	} finally { cleanup(); }
+});
+
+test("两通道 entry id 独立计数：同会话各自从 j_0001 起且不串号", () => {
+	const { store, cleanup } = freshStore();
+	try {
+		const t1 = store.appendEntry("s1", { turn: 1, step: 1, kind: "finding", summary: "t1" }, "text");
+		const r1 = store.appendEntry("s1", { turn: 1, step: 1, kind: "r-plan", summary: "r1" }, "reasoning");
+		const t2 = store.appendEntry("s1", { turn: 1, step: 2, kind: "fact", summary: "t2" }, "text");
+		const r2 = store.appendEntry("s1", { turn: 1, step: 2, kind: "r-hypothesis", summary: "r2" }, "reasoning");
+		assert.deepEqual([t1.entry.id, t2.entry.id], ["j_0001", "j_0002"]);
+		assert.deepEqual([r1.entry.id, r2.entry.id], ["j_0001", "j_0002"], "reasoning 通道独立计数");
+	} finally { cleanup(); }
+});
+
+test("跨通道 kind 校验：reasoning kind 进 text 通道 / 正式 kind 进 reasoning 通道 / 非法 channel 均拒绝", () => {
+	const { store, events, cleanup } = freshStore();
+	try {
+		// reasoning kind 混入 text 通道 → 拒绝且不落盘
+		const bad1 = store.appendEntry("s1", { turn: 1, step: 1, kind: "r-decision", summary: "x" }, "text");
+		assert.equal(bad1.ok, false);
+		// 正式 kind 混入 reasoning 通道 → 拒绝
+		const bad2 = store.appendEntry("s1", { turn: 1, step: 1, kind: "finding", summary: "x" }, "reasoning");
+		assert.equal(bad2.ok, false);
+		// 非法 channel → 拒绝
+		const bad3 = store.appendEntry("s1", { turn: 1, step: 1, kind: "finding", summary: "x" }, "bogus");
+		assert.equal(bad3.ok, false);
+		// validateEntry 直接校验
+		assert.equal(validateEntry({ id: "j_0001", kind: "r-plan", summary: "x" }, "reasoning").length, 0);
+		assert.ok(validateEntry({ id: "j_0001", kind: "finding", summary: "x" }, "reasoning").some((e) => e.includes("kind 非法")));
+		assert.ok(events.some((e) => e.name === "semantic-watcher/store-corruption" && e.payload.stage === "validate"));
+		// 两类账本均无残留
+		assert.equal(store.readEntries("s1").length, 0);
+		assert.equal(store.readReasoningEntries("s1").length, 0);
+	} finally { cleanup(); }
+});
+
+test("reasoning-stall observation：显式 kind + message 落 observation 账本，不入任何结论账本", () => {
+	const { store, cleanup } = freshStore();
+	try {
+		const ok = store.appendObservation("s1", {
+			turn: 1, step: 8, hasText: false, textLen: 0, reasoningLen: 9000, hasArtifact: false,
+			kind: "reasoning-stall", message: "推理长时间未产出正式结论"
+		});
+		assert.equal(ok, true);
+		// 默认 kind 仍为 reasoning-observation
+		const ok2 = store.appendObservation("s1", { turn: 1, step: 9, hasText: false, reasoningLen: 100 });
+		const obs = store.readObservations("s1");
+		assert.equal(obs.length, 2);
+		assert.equal(obs[0].kind, "reasoning-stall");
+		assert.equal(obs[0].message, "推理长时间未产出正式结论");
+		assert.equal(obs[1].kind, "reasoning-observation", "未显式传 kind 时默认常规观察");
+		// 观察不污染任一结论通道
+		assert.equal(store.readEntries("s1").length, 0);
+		assert.equal(store.readReasoningEntries("s1").length, 0);
+	} finally { cleanup(); }
+});
+
+test("reasoning 通道重启恢复 id 计数（只扫 reasoning 账本）", () => {
+	const { root, store, cleanup } = freshStore();
+	try {
+		store.appendEntry("s1", { turn: 1, step: 1, kind: "r-decision", summary: "r1" }, "reasoning");
+		store.appendEntry("s1", { turn: 1, step: 2, kind: "r-plan", summary: "r2" }, "reasoning");
+		const store2 = createJourneyStore({ root, log: () => {} });
+		const next = store2.appendEntry("s1", { turn: 1, step: 3, kind: "r-dead-end", summary: "r3" }, "reasoning");
+		assert.equal(next.entry.id, "j_0003", "重启后 reasoning 通道应从 reasoning 账本恢复到 j_0003");
+		// 新实例 text 通道计数不受 reasoning 账本影响
+		const tNext = store2.appendEntry("s1", { turn: 1, step: 1, kind: "finding", summary: "t1" }, "text");
+		assert.equal(tNext.entry.id, "j_0001", "text 通道无账本时应从 j_0001 起");
 	} finally { cleanup(); }
 });

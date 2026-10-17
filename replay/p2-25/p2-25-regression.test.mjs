@@ -325,7 +325,7 @@ test("assertion-⑤ 合法空 entries 不 gap 且推进水位；嵌套畸形才�
 			onSummarized: () => {},
 			onGap: (sid, meta) => gaps.push({ sid, ...meta })
 		});
-		summarizer.enqueue("s5", { messageId: "m1", turn: 1, step: 2, text: "有助手内容但无新结论的一步" });
+		summarizer.enqueue("s5", { sourceKind: "text", messageId: "m1", turn: 1, step: 2, text: "有助手内容但无新结论的一步" });
 		await summarizer.flush(); // setImmediate 排空，不使用定时器
 
 		assert.equal(gaps.length, 0, "合法空 entries 不得记 onGap");
@@ -352,7 +352,7 @@ test("assertion-⑤ 合法空 entries 不 gap 且推进水位；嵌套畸形才�
 			onSummarized: () => {},
 			onGap: (sid, meta) => badGaps.push({ sid, ...meta })
 		});
-		badSummarizer.enqueue("s5", { messageId: "m2", turn: 1, step: 1, text: "另一条助手内容" });
+		badSummarizer.enqueue("s5", { sourceKind: "text", messageId: "m2", turn: 1, step: 1, text: "另一条助手内容" });
 		await badSummarizer.flush();
 
 		assert.equal(badGaps.length, 1, "畸形草稿（重试 1 次后仍无效）必须恰好记 1 次 gap");

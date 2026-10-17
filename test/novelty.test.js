@@ -38,6 +38,11 @@ test("lexicalCheck：词法命中返回 duplicate 与 duplicateOf", () => {
 	const miss = lexicalCheck("全新的方向：改用数据库索引优化查询计划", cand);
 	assert.equal(miss.lexicalDuplicate, false);
 	assert.equal(miss.duplicateOf ?? null, null);
+	// 改进②：自定义阈值可改变判定结果（部分重叠文本：默认 0.8 miss、0.2 hit）
+	const looser = lexicalCheck("读取配置文件失败因为目录不存在", cand, 0.2);
+	assert.equal(looser.lexicalDuplicate, true);
+	const stillMiss = lexicalCheck("读取配置文件失败因为目录不存在", cand);
+	assert.equal(stillMiss.lexicalDuplicate, false, "默认阈值下部分重叠仍为 miss");
 });
 
 test("cosine：同向=1、正交≈0", () => {
@@ -74,6 +79,15 @@ test("decideNovelty 三分支（§5.2 规则）", () => {
 	assert.equal(semHit.semantic_duplicate, true);
 	const nw = decideNovelty({ lexicalDuplicate: false, duplicateOf: null }, null);
 	assert.equal(nw.novelty, "new");
+	// 改进③：纯语义模式下 lexical=null 时仍能正确判定
+	const semOnlyHit = decideNovelty(null, { semanticDuplicate: true, duplicateOf: "j_0002" });
+	assert.equal(semOnlyHit.novelty, "duplicate");
+	assert.equal(semOnlyHit.semantic_duplicate, true);
+	const semOnlyMiss = decideNovelty(null, { semanticDuplicate: false, duplicateOf: null });
+	assert.equal(semOnlyMiss.novelty, "new");
+	assert.equal(semOnlyMiss.similarity, null);
+	const noInfo = decideNovelty(null, null);
+	assert.equal(noInfo.novelty, "new");
 });
 
 test("embedding 阈值常量", () => {

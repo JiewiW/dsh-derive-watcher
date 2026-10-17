@@ -29,7 +29,7 @@ reasoning（思考块）与正式 text 分开观察、走独立账本：当模�
 账本条目超过阈值（`recentN × 3`）时，最旧一批交模型蒸馏成里程碑、原文移入归档。失败教训（dead-end）全量保留零丢失，未完成目标（open objectives）跨折叠保留。
 
 **5. 上下文注入（默认关闭）**
-在下一步前把「未完成目标（置顶）+ 里程碑 + 最近 N 条结论」注入上下文；只做整条剔除和句界裁剪，不会截断单条中间。水位落后时明确标注 `latestSummarized:false`，不用陈旧条目冒充新结论。
+在下一步前把「最近几条未完成目标（置顶）+ 里程碑 + 最近 N 条有推进意义的结论 + 最近几条死胡同」注入上下文。目标与死胡同默认各只取最近 3 条（`injectionObjectiveLimit` / `injectionDeadEndLimit`），更早的只报数量，避免只增不减把预算吃穿；结论区只收 finding/decision/fact 等有进展的条目，计划类只在目标区展示，复读与已被取代的条目不注入。预算紧张时依次压正文、剔旧结论、收缩目标与死胡同、把摘要压成短句，最后实在放不下才降级为「最新要点」单行，不再整块跳过。水位落后时明确标注 `latestSummarized:false`，不用陈旧条目冒充新结论。
 
 **6. 三级语义停滞响应**
 
@@ -75,7 +75,7 @@ dsh plugin --profile <你的profile> add github:JiewiW/dsh-derive-watcher#v0.2.1
 
 ## 设置
 
-22 项、六个分组（旅程账本 / 总结 / 注入与折叠 / 新颖性 / 停滞阈值 / 存储），运行时经 `GET/POST /plugins/derive-watcher/settings` 读写，GET 返回完整 schema。常用默认值：
+33 项、六个分组（旅程账本 / 总结 / 注入与折叠 / 新颖性 / 停滞阈值 / 存储），运行时经 `GET/POST /plugins/derive-watcher/settings` 读写，GET 返回完整 schema。常用默认值：
 
 | 键 | 默认 | 说明 |
 | --- | --- | --- |
@@ -86,7 +86,12 @@ dsh plugin --profile <你的profile> add github:JiewiW/dsh-derive-watcher#v0.2.1
 | `stallWatchSteps` / `stallWatchWindowSec` | 3 / 300 | 墙钟旁路：连续无产出步骤数 K 与跨度 T（秒） |
 | `injectionTokenBudget` | 1200（允许 800–1500） | 注入 token 预算 |
 | `recentN` | 8 | 最近结论窗口，也是折叠阈值基准 |
-| `noveltyMode` | `schema-selfcheck` | 另可选 `embedding` / `both` |
+| `injectionObjectiveLimit` | 3（允许 1–10） | 目标区最多注入几条未完成目标（最近优先） |
+| `injectionDeadEndLimit` | 3（允许 1–10） | 死胡同区最多注入几条（最近优先） |
+| `noveltyMode` | `schema-selfcheck` | 另可选 `embedding` / `both` / `semantic-only`（改进③：跳过词法层，逐字复读也做语义判定） |
+| `lexicalThreshold` | 0.8（允许 0.1–0.95） | 词法重复判定阈值（改进②：小数键，不四舍五入） |
+| `enableLexicalStallCount` | `false` | 改进①：词法重复计入停滞升级（code 派生 `lexical-stall-2`） |
+| `lexicalStallSteps` | 0（允许 0–50，0=关） | 改进⑤：独立词法复读警告阈值，>0 时连续 N 条词法重复发 `lexical-stall` 事件（仅提示，不升级） |
 | `maxConcurrency` | 1（上限 2） | 总结并发闸 |
 | `sessionTtlMinutes` | 10 | 会话无新事件后的存活时间 |
 | `retentionDays` / `ledgerRetentionDays` | 30 / 0 | 归档保留天数；主账本保留天数（0 = 不清主账本） |
@@ -96,16 +101,16 @@ dsh plugin --profile <你的profile> add github:JiewiW/dsh-derive-watcher#v0.2.1
 
 ## 事件
 
-11 个事件（`semantic-watcher/*` 前缀），全部载荷样例见 [docs/events.md](docs/events.md)：
+12 个事件（`semantic-watcher/*` 前缀），全部载荷样例见 [docs/events.md](docs/events.md)：
 
-`stall` · **`intervention`（v0.2.0 新增，stall-2/3 的 L2 干预受理结果）** · `store-corruption` · `injection-skipped` · `execution-unavailable` · `lexical-repeat` · `summarizer-degraded` · `handoff-written` · `heartbeat` · `fold-milestone` · `retention-cleaned`
+`stall` · **`intervention`（v0.2.0 新增，stall-2/3 的 L2 干预受理结果）** · `store-corruption` · `injection-skipped` · `execution-unavailable` · `lexical-repeat` · **`lexical-stall`（改进⑤ 新增，词法复读独立警告）** · `summarizer-degraded` · `handoff-written` · `heartbeat` · `fold-milestone` · `retention-cleaned`
 
 `intervention` 只在 L2 调用**成功返回**时发出，必带 `action`（`deny-read` / `reject-step`）、`accepted`、`code`、`level`；`ttlSteps` / `expiresAtStep` / `pending` 仅在 L2 返回值真实存在时才写入。L2 调用失败仍走 `execution-unavailable`，不发 `intervention`。
 
 ## 测试
 
 ```sh
-npm test            # node --test --test-concurrency=1 "test/*.test.js"，134 用例
+npm test            # node --test --test-concurrency=1 "test/*.test.js"，175 用例
 npm run test:p225   # P2-25 事务四线回归（11 用例）
 ```
 

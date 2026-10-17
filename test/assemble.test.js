@@ -344,3 +344,88 @@ test("P1-13：会话首事件触发一次性重启补扫（按观察水位，幂
 	assert.equal(store.readObservations(sid).length, before2, "补扫幂等：二次触发不重复");
 	dispose2();
 });
+
+// ── 步骤3：text / reasoning 双通道分流（live + P1-13 补扫共用 dispatchStepChannels）──
+test("步骤3：纯 reasoning-only step 只入 reasoning 队列，text 入队不增", async () => {
+	const [onEvent] = ctx.handlers.get("session/event");
+	const session = makeSession("test-rs-live");
+	const before = dispose.getDebugState().summaryEnqueued;
+	onEvent(session, {
+		type: "assistant/message",
+		data: {
+			turn: 1, step: 1,
+			message: { id: "am-rs-1", source: { kind: "model" }, content: [{ type: "reasoning", text: "我在权衡两个方案，先假设 A 可行" }] }
+		}
+	});
+	await settle(6);
+	const after = dispose.getDebugState().summaryEnqueued;
+	assert.equal(after.text, before.text, "纯 reasoning step 不得入 text 队列");
+	assert.equal(after.reasoning, before.reasoning + 1, "纯 reasoning step 应入 reasoning 队列 1 个 job");
+	// 观察账本仍只记长度：reasoning 原文不得落入 observation / text 结论账本
+	const obs = createJourneyStore({ root: tempRoot, emit: () => {}, log: () => {} }).readObservations("test-rs-live");
+	const obsRow = obs.find((o) => o.step === 1);
+	assert.ok(obsRow, "纯 reasoning step 仍写一条观察");
+	assert.equal(obsRow.hasText, false);
+	assert.ok(obsRow.reasoningLen > 0, "观察只存 reasoning 长度");
+	assert.ok(!JSON.stringify(obsRow).includes("权衡两个方案"), "观察账本不得含 reasoning 原文");
+});
+
+test("步骤3：enableReasoningJourney=false 后纯 reasoning step 两路都不入 reasoning 队", async () => {
+	// 关闭 reasoning 提炼（POST 走 SETTINGS_SCHEMA 白名单，键必须先在 schema 登记）
+	let res = fakeRes();
+	await ctx.routes[0].handler(postReq({ settings: { enableReasoningJourney: false } }), res);
+	assert.equal(res.status, 200);
+	const [onEvent] = ctx.handlers.get("session/event");
+	const session = makeSession("test-rs-off");
+	const before = dispose.getDebugState().summaryEnqueued;
+	onEvent(session, {
+		type: "assistant/message",
+		data: { turn: 1, step: 1, message: { id: "am-rs-off-1", source: { kind: "model" }, content: [{ type: "reasoning", text: "开关关闭后这段思考不应被提炼" }] } }
+	});
+	await settle(6);
+	const after = dispose.getDebugState().summaryEnqueued;
+	assert.equal(after.reasoning, before.reasoning, "开关关闭：reasoning 不入队");
+	assert.equal(after.text, before.text, "开关关闭：text 也不应入队（纯 reasoning step）");
+	// 观察记录照旧（开关只挡提炼，不挡观察）
+	const obs = createJourneyStore({ root: tempRoot, emit: () => {}, log: () => {} }).readObservations("test-rs-off");
+	assert.ok(obs.some((o) => o.step === 1 && o.reasoningLen > 0), "关闭提炼后观察仍记录 reasoning 长度");
+	// 还原开关
+	res = fakeRes();
+	await ctx.routes[0].handler(postReq({ settings: { enableReasoningJourney: true } }), res);
+	assert.equal(res.status, 200);
+});
+
+test("步骤3：P1-13 补扫纯 reasoning 事件——开关注 reasoning/text 不收，关关注都不收", async () => {
+	const reasoningEvents = [
+		{ type: "assistant/message", data: { turn: 1, step: 1, message: { id: "bf-rs-1", source: { kind: "model" }, content: [{ type: "reasoning", text: "补扫场景下只有思考块" }] } } }
+	];
+
+	// ① 开关默认开：reasoning 队列收 1、text 队列收 0
+	const ctxOpen = makeCtx({ sessionQuery: { listEvents: () => reasoningEvents } });
+	const disposeOpen = apply(ctxOpen, undefined);
+	const [onOpen] = ctxOpen.handlers.get("session/event");
+	onOpen({ id: "test-rs-backfill-open", append: () => true }, { type: "turn/end", data: { turn: 1, reason: "done" } });
+	await settle(4);
+	const openState = disposeOpen.getDebugState().summaryEnqueued;
+	assert.equal(openState.reasoning, 1, "补扫：开关开时 reasoning 队列收到 1 个 job");
+	assert.equal(openState.text, 0, "补扫：纯 reasoning 事件不得入 text 队列");
+	disposeOpen();
+
+	// ② 开关关：补扫两路都不收 reasoning job（在新 apply 前把设置文件写为 false）
+	const closedSettings = { ...testSettings, enableReasoningJourney: false };
+	writeFileSync(SETTINGS_PATH, JSON.stringify(closedSettings, null, 2));
+	try {
+		const ctxClosed = makeCtx({ sessionQuery: { listEvents: () => reasoningEvents } });
+		const disposeClosed = apply(ctxClosed, undefined);
+		const [onClosed] = ctxClosed.handlers.get("session/event");
+		onClosed({ id: "test-rs-backfill-closed", append: () => true }, { type: "turn/end", data: { turn: 1, reason: "done" } });
+		await settle(4);
+		const closedState = disposeClosed.getDebugState().summaryEnqueued;
+		assert.equal(closedState.reasoning, 0, "补扫：开关关时 reasoning 不入队");
+		assert.equal(closedState.text, 0, "补扫：开关关时 text 也不入队");
+		disposeClosed();
+	} finally {
+		// 还原设置文件到测试默认态（enableReasoningJourney=true），避免污染后续测试文件
+		writeFileSync(SETTINGS_PATH, JSON.stringify(testSettings, null, 2));
+	}
+});

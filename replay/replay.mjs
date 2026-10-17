@@ -206,6 +206,7 @@ async function replayOne(sessionId) {
 			if (!hasText) continue;
 			const messageId = ev.data?.message?.id ?? `am-${enqueued + 1}`;
 			summarizer.enqueue(sessionId, {
+				sourceKind: "text",
 				messageId,
 				turn: ev.data?.turn ?? ev.data?.message?.turn ?? null,
 				step,
