@@ -86,7 +86,7 @@ DSH Web 右侧栏新增「语义监视」选项卡，把一次会话的治理痕
 ## 安装
 
 ```sh
-dsh plugin --profile <你的profile> add github:JiewiW/dsh-derive-watcher#v0.2.1
+dsh plugin --profile <你的profile> add github:JiewiW/dsh-derive-watcher#v0.3.0
 ```
 
 零第三方运行时依赖。账本默认落在 `~/.dsh/storages/semantic-watcher/`（设置项 `storagePath` 可改）。
@@ -128,7 +128,7 @@ dsh plugin --profile <你的profile> add github:JiewiW/dsh-derive-watcher#v0.2.1
 ## 测试
 
 ```sh
-npm test            # node --test --test-concurrency=1 "test/*.test.js"，175 用例
+npm test            # node --test --test-concurrency=1 "test/*.test.js"，236 用例
 npm run test:p225   # P2-25 事务四线回归（11 用例）
 ```
 
@@ -148,6 +148,8 @@ npm run test:p225   # P2-25 事务四线回归（11 用例）
 
 ## 版本记录
 
+- **0.3.0**：新增「静默中断识别与原窗口主动续跑」（P1 计划书）：回合被步级上限（blocked）、输出长度上限（max-tokens）或运行时错误（error）打断、且未形成面向用户的结论时，识别为静默中断。动作模式四档（`off` / `notify` 默认 / `followup` / `goal-resume`），带完整安全闸（冷却 15 秒、每会话预算 3 次、进展校验、错误码排除、goal 让位、服务降级 fail-open），六类事件落账本并在 timeline「干预」通道展示。配套 silent-abort 测试套件 T1–T6 全覆盖，全量 247/247 通过。
+- **0.2.2**：全部设置项与时间线卡片文案人类化——设置按用途重新分组（总开关/生成小结/塞回上下文/判断新旧内容/发现卡死/文件存放）、「判断新旧内容的方式」改为下拉选择、能力条与记录目录文案重写；干预卡片不再显示内部代号。仅改显示层，配置格式与既有行为不变。
 - **0.2.1**：修复总结器模型路由缺失（调用未传 provider/model，内核返回 `NO_ADAPTER`，此前被统一误判为草稿解析失败）——该缺陷使所有会话的语义条目 100% 落成 `gap`，timeline 上只能看到心跳与降级事件。同时新增 `gap` 时间线来源与原因徽标、心跳默认折叠、超时与失败分类日志。
 - **0.2.0**：右侧栏「语义监视」timeline 选项卡与 `intervention` 干预受理事件埋点。
 
