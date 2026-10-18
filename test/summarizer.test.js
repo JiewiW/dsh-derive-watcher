@@ -17,7 +17,7 @@ import { DEFAULT_SETTINGS } from "../lib/settings.js";
 const draftJson = (summary, extra = {}) =>
 	JSON.stringify({ entries: [{ kind: "finding", summary, detail: "", artifacts: [], supersedes: [], confidence: 0.8, ...extra }] });
 
-function harness(callLlm, settingsOverrides = {}) {
+function harness(callLlm, settingsOverrides = {}, now = Date.now) {
 	const root = mkdtempSync(join(tmpdir(), "dsw-sum-"));
 	const events = [];
 	const store = createJourneyStore({ root, emit: (n, p) => events.push({ n, p }), log: () => {} });
@@ -26,7 +26,7 @@ function harness(callLlm, settingsOverrides = {}) {
 	const summarized = [];
 	const summarizer = createSummarizer({
 		store, emit: (n, p) => events.push({ n, p }), log: () => {},
-		getSettings: () => settings, callLlm,
+		getSettings: () => settings, callLlm, now,
 		onSummarized: (sid, info) => summarized.push({ sid, ...info }),
 		onGap: (sid, meta) => gaps.push({ sid, ...meta })
 	});
@@ -260,6 +260,7 @@ test("队列上限 8：溢出丢最旧 + gap + 事件；其余照常处理", asy
 		assert.ok(h.events.some((e) => e.n === EVT.SUMMARIZER_DEGRADED && String(e.p.suppressReason).includes("队列溢出")));
 		const lines = h.store.readAllLines("s1");
 		assert.equal(lines[lines.length - 1].type, "gap");
+		assert.equal(lines[lines.length - 1].grade, "overflow", "溢出 gap 必须带 grade，timeline 才能按同类合并");
 		release();
 		await awaitDrain(h, 9);
 		assert.equal(h.summarizer.stats().processed, 9);
@@ -267,6 +268,28 @@ test("队列上限 8：溢出丢最旧 + gap + 事件；其余照常处理", asy
 		assert.equal(h.store.loadWatermark("s1").lastMessageId, "m10");
 		assert.equal(h.store.loadWatermark("s1").lastStepSeq, 10);
 	} finally { release?.(); h.cleanup(); }
+});
+
+test("降级事件节流：同会话同通道同 grade 60s 内只发首条，下一条事件携带被抑制数", async () => {
+	let clock = 1_000_000;
+	const h = harness(async () => "不是 JSON", {}, () => clock);
+	try {
+		for (let i = 1; i <= 3; i++) {
+			h.summarizer.enqueue("s1", { sourceKind: "text", messageId: `m${i}`, turn: 1, step: i, text: `消息${i}` });
+			await settle(6);
+		}
+		assert.equal(h.summarizer.stats().degraded, 3, "三次都真实降级");
+		assert.equal(h.gaps.length, 3, "gap 逐条落盘，计数不失真");
+		const first = h.events.filter((e) => e.n === EVT.SUMMARIZER_DEGRADED);
+		assert.equal(first.length, 1, "60s 窗口内只发首条事件");
+		assert.equal(first[0].p.suppressedCount, undefined, "首条不带抑制数");
+		clock += 60_001;
+		h.summarizer.enqueue("s1", { sourceKind: "text", messageId: "m4", turn: 1, step: 4, text: "消息4" });
+		await settle(6);
+		const after = h.events.filter((e) => e.n === EVT.SUMMARIZER_DEGRADED);
+		assert.equal(after.length, 2, "窗口过后放行一条");
+		assert.equal(after[1].p.suppressedCount, 2, "被抑制的 2 条随下一条事件带出");
+	} finally { h.cleanup(); }
 });
 
 test("P2-21①：messageId 缺失的入队其 evict 键与 add 键同构（无 null 残留 seen）", async () => {

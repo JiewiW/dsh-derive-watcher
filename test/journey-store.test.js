@@ -122,6 +122,12 @@ test("appendGap / appendMilestone / readMilestones", () => {
 		store.appendGap("s1", { reason: "测试 gap", turn: 1, step: 2 });
 		const lines = store.readAllLines("s1");
 		assert.equal(lines[lines.length - 1].type, "gap");
+		// reasoning 通道的 gap 写独立账本：readGaps 必须两本都读，否则 timeline 只剩事件卡
+		store.appendGap("s1", { reason: "队列溢出丢弃最旧", grade: "overflow", turn: 2, step: 5 }, "reasoning");
+		const gaps = store.readGaps("s1");
+		assert.equal(gaps.length, 2, "text 与 reasoning 两本账本的 gap 都要返回");
+		assert.equal(gaps[1].channel, "reasoning");
+		assert.equal(gaps[1].grade, "overflow");
 		const m = store.appendMilestone("s1", {
 			id: "j_0009", turn: 1, step: 3, sourceMessageId: null, kind: "finding",
 			summary: "里程碑", detail: "", artifacts: [], supersedes: [], confidence: null, covers: ["j_0001"]

@@ -264,7 +264,7 @@ writeFileSync(join(tempRoot, "journey", `${GAP_LEDGER}.jsonl`), [
 	JSON.stringify({ type: "gap", ts: iso("05"), sessionId: GAP_LEDGER, reason: "队列溢出丢弃最旧", turn: 2, step: 6 })
 ].join("\n") + "\n");
 
-test("gap 合并：连续同 grade 合成一张卡，counts 仍按真实条数统计", async () => {
+test("gap 合并：连续多段跳过合成一张卡并按原因分档计数，counts 仍按真实条数统计", async () => {
 	const ctx = makeCtx({ sessionQuery: makeQuery(), llm: { stream: async function* () {} } });
 	const dispose = apply(ctx, undefined);
 	try {
@@ -273,26 +273,20 @@ test("gap 合并：连续同 grade 合成一张卡，counts 仍按真实条数�
 		await route.handler({ method: "GET", url: `/plugins/derive-watcher/timeline?sessionId=${GAP_LEDGER}` }, res);
 		assert.equal(res.status, 200);
 		const gapItems = res.body.items.filter((i) => i.source === "gap");
-		assert.equal(gapItems.length, 3, "5 条 gap 合并为 3 张卡：timeout×3→1、empty×1、无 grade×1");
-		assert.equal(res.body.counts.gap, 5, "counts 按真实条数，不受合并影响");
-		// 合并卡：3 条连续 timeout
-		const merged = gapItems.find((i) => i.data?.coalesced);
-		assert.ok(merged, "存在合并卡");
-		assert.equal(merged.grade, "timeout");
-		assert.equal(merged.title, "总结跳过 3 次：调用超时");
-		assert.equal(merged.data.coalesced.count, 3);
-		assert.equal(merged.data.coalesced.firstTs, iso("03"), "合并卡挂载在最新一条上，firstTs/lastTs 覆盖整段区间");
-		assert.equal(merged.data.coalesced.lastTs, iso("01"), "降序遍历：合并卡锚定最新一条，lastTs 收敛到最旧一条");
-		assert.deepEqual(merged.data.coalesced.turns, [2, 1, 1], "turns 按降序收集");
-		assert.ok(merged.summary.includes("3 次连续同类跳过") && merged.summary.includes("最近一次："), `合并摘要：${merged.summary}`);
-		// empty 与 timeout 是两回事，各自独立成卡
-		const emptyCard = gapItems.find((i) => i.grade === "empty");
-		assert.equal(emptyCard.title, "总结跳过：模型空回复");
-		assert.equal(emptyCard.data.coalesced, undefined, "grade 不同不合并");
-		// 无 grade 老数据（队列溢出路径）：原样展示，不合并
-		const legacyCard = gapItems.find((i) => i.grade === null);
-		assert.equal(legacyCard.title, "总结跳过（原因未知）");
-		assert.equal(legacyCard.data.coalesced, undefined, "grade 缺失不合并");
+		assert.equal(gapItems.length, 1, "5 条 gap（含原因交替）全量聚合成 1 张卡");
+		assert.equal(res.body.counts.gap, 5, "counts 按真实条数，不受聚合影响");
+		const merged = gapItems[0];
+		assert.equal(merged.title, "总结跳过 5 次", "原因混合时标题只报总数");
+		assert.equal(merged.data.coalesced.count, 5);
+		assert.equal(merged.data.coalesced.firstTs, iso("01"), "firstTs 为最早一条");
+		assert.equal(merged.data.coalesced.lastTs, iso("05"), "lastTs 为最新一条");
+		assert.deepEqual(merged.data.coalesced.turns, [1, 1, 2, 2, 2], "turns 按时间升序收集");
+		assert.deepEqual(merged.data.coalesced.steps, [2, 3, 4, 5, 6], "steps 按时间升序收集");
+		// 分档明细进摘要：老数据（无 grade 的队列溢出）按固定文案归一为 overflow
+		assert.ok(merged.summary.includes("共跳过 5 次"), `摘要报总数：${merged.summary}`);
+		assert.ok(merged.summary.includes("调用超时 3"), `摘要含超时计数：${merged.summary}`);
+		assert.ok(merged.summary.includes("模型空回复 1"), `摘要含空回复计数：${merged.summary}`);
+		assert.ok(merged.summary.includes("队列溢出 1"), `摘要含队列溢出计数：${merged.summary}`);
 	} finally { dispose(); }
 });
 
@@ -304,7 +298,7 @@ writeFileSync(join(tempRoot, "journey", `${GAP_LEDGER_MIX}.jsonl`), [
 	JSON.stringify({ type: "gap", ts: iso("13"), sessionId: GAP_LEDGER_MIX, grade: "timeout", reason: "总结器调用超时（aborted），跳过并记 gap", turn: 1, step: 3 })
 ].join("\n") + "\n");
 
-test("gap 不跨 grade 合并：timeout→empty→timeout 形成三张独立卡", async () => {
+test("gap 跨 grade 合并：timeout→empty→timeout 合成一张卡，明细按原因分档", async () => {
 	const ctx = makeCtx({ sessionQuery: makeQuery(), llm: { stream: async function* () {} } });
 	const dispose = apply(ctx, undefined);
 	try {
@@ -313,10 +307,74 @@ test("gap 不跨 grade 合并：timeout→empty→timeout 形成三张独立卡"
 		await route.handler({ method: "GET", url: `/plugins/derive-watcher/timeline?sessionId=${GAP_LEDGER_MIX}` }, res);
 		assert.equal(res.status, 200);
 		const gapItems = res.body.items.filter((i) => i.source === "gap");
-		assert.equal(gapItems.length, 3, "两条 timeout 被 empty 隔断，不合成一张");
+		assert.equal(gapItems.length, 1, "相邻三段跳过合并成一张，不再一墙卡片");
 		assert.equal(res.body.counts.gap, 3);
-		assert.equal(gapItems.every((i) => i.data?.coalesced === undefined), true, "没有任何卡片被合并");
-		assert.deepEqual(gapItems.map((i) => i.grade), ["timeout", "empty", "timeout"], "ts 降序：13>12>11");
+		assert.equal(gapItems[0].title, "总结跳过 3 次");
+		assert.ok(gapItems[0].summary.includes("调用超时 2") && gapItems[0].summary.includes("模型空回复 1"), `分档摘要：${gapItems[0].summary}`);
+	} finally { dispose(); }
+});
+
+// ── reasoning 通道 gap 可见性：reasoning 账本与主账本同属一个会话 ──
+const GAP_LEDGER_REASONING = "gapr";
+writeFileSync(join(tempRoot, "journey", `${GAP_LEDGER_REASONING}.reasoning.jsonl`), [
+	JSON.stringify({ type: "gap", ts: iso("21"), sessionId: GAP_LEDGER_REASONING, channel: "reasoning", grade: "parse-error", reason: "草稿解析失败（重问 2 次仍不可用）", turn: 2, step: 7 }),
+	JSON.stringify({ type: "gap", ts: iso("22"), sessionId: GAP_LEDGER_REASONING, channel: "reasoning", grade: "parse-error", reason: "草稿解析失败（重问 2 次仍不可用）", turn: 2, step: 8 })
+].join("\n") + "\n");
+
+test("reasoning 账本的 gap 在 timeline 可见并合并；会话列表不出现 xxx.reasoning 假会话", async () => {
+	const ctx = makeCtx({ sessionQuery: makeQuery(), llm: { stream: async function* () {} } });
+	const dispose = apply(ctx, undefined);
+	try {
+		const route = findRoute(ctx.routes, "/plugins/derive-watcher/timeline");
+		const res = fakeRes();
+		await route.handler({ method: "GET", url: `/plugins/derive-watcher/timeline?sessionId=${GAP_LEDGER_REASONING}` }, res);
+		assert.equal(res.status, 200);
+		const gapItems = res.body.items.filter((i) => i.source === "gap");
+		assert.equal(gapItems.length, 1, "两条连续 parse-error 在 reasoning 账本里合并成一张卡");
+		assert.equal(gapItems[0].title, "总结跳过 2 次：草稿解析失败");
+		assert.equal(res.body.counts.gap, 2);
+		const sessionsRoute = findRoute(ctx.routes, "/plugins/derive-watcher/timeline/sessions");
+		const res2 = fakeRes();
+		await sessionsRoute.handler({ method: "GET", url: "/plugins/derive-watcher/timeline/sessions" }, res2);
+		assert.equal(res2.status, 200);
+		assert.ok(res2.body.sessions.some((s) => s.sessionId === GAP_LEDGER_REASONING && s.hasLedger === true), "reasoning 账本归并到主会话");
+		assert.equal(res2.body.sessions.some((s) => s.sessionId === `${GAP_LEDGER_REASONING}.reasoning`), false, "不得出现假会话 id");
+	} finally { dispose(); }
+});
+
+// ── 降级事件卡去重：同一 turn/step 已有 gap 卡时丢掉重复的「总结质量降级」事件卡 ──
+const GAP_LEDGER_DEDUP = "gapd";
+writeFileSync(join(tempRoot, "journey", `${GAP_LEDGER_DEDUP}.jsonl`), JSON.stringify({
+	type: "gap", ts: iso("31"), sessionId: GAP_LEDGER_DEDUP, grade: "timeout",
+	reason: "总结器调用超时（aborted），跳过并记 gap", turn: 5, step: 3
+}) + "\n");
+const DEDUP_EVENTS = [
+	{ seq: 31, type: "semantic-watcher/summarizer-degraded", time: Date.parse(iso("31")), data: { sessionId: GAP_LEDGER_DEDUP, turn: 5, step: 3, ts: iso("31"), grade: "timeout", suppressReason: "总结器调用超时（aborted），跳过并记 gap" } },
+	{ seq: 32, type: "semantic-watcher/summarizer-degraded", time: Date.parse(iso("32")), data: { sessionId: GAP_LEDGER_DEDUP, turn: 6, step: 1, ts: iso("32"), grade: "timeout", suppressReason: "总结器调用超时（aborted），跳过并记 gap" } }
+];
+const DEDUP_RECORDS_LITE = DEDUP_EVENTS.map((e) => ({ sessionId: GAP_LEDGER_DEDUP, seq: e.seq, type: e.type, time: e.time, surface: "current" }));
+
+test("降级事件去重：同一 turn/step 的 gap 与降级事件只留 gap 卡", async () => {
+	const ctx = makeCtx({
+		sessionQuery: {
+			...makeQuery(),
+			listEvents: async (sid) => (sid === GAP_LEDGER_DEDUP ? DEDUP_RECORDS_LITE : []),
+			readSession: async (sid) => (sid === GAP_LEDGER_DEDUP ? { session: { id: sid }, events: DEDUP_EVENTS } : { session: { id: sid }, events: [] }),
+			readTitleSnapshots: async () => [],
+			listSessions: async () => []
+		},
+		llm: { stream: async function* () {} }
+	});
+	const dispose = apply(ctx, undefined);
+	try {
+		const route = findRoute(ctx.routes, "/plugins/derive-watcher/timeline");
+		const res = fakeRes();
+		await route.handler({ method: "GET", url: `/plugins/derive-watcher/timeline?sessionId=${GAP_LEDGER_DEDUP}` }, res);
+		assert.equal(res.status, 200);
+		const degraded = res.body.items.filter((i) => i.kind === "summarizer-degraded");
+		assert.equal(degraded.length, 1, "turn5/step3 的降级事件被 gap 卡吸收，turn6/step1 的仍保留");
+		assert.equal(degraded[0].turn, 6);
+		assert.equal(res.body.items.filter((i) => i.source === "gap").length, 1);
 	} finally { dispose(); }
 });
 

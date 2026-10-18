@@ -11,8 +11,8 @@ import {
 	applyRuntimeSettings, firstRunGuards, makeSettingsStore
 } from "../lib/settings.js";
 
-test("DEFAULT_SETTINGS：33 键全量与首发态", () => {
-	assert.equal(Object.keys(DEFAULT_SETTINGS).length, 33);
+test("DEFAULT_SETTINGS：45 键全量与首发态（含小结模型/超时三键）", () => {
+	assert.equal(Object.keys(DEFAULT_SETTINGS).length, 45);
 	assert.equal(DEFAULT_SETTINGS.enableJourney, true);
 	assert.equal(DEFAULT_SETTINGS.enableInjection, false);
 	assert.equal(DEFAULT_SETTINGS.enableStall3Reject, false);
@@ -36,11 +36,21 @@ test("DEFAULT_SETTINGS：33 键全量与首发态", () => {
 	assert.equal(DEFAULT_SETTINGS.stall3Steps, 10);
 	assert.equal(DEFAULT_SETTINGS.retentionDays, 30);
 	assert.equal(DEFAULT_SETTINGS.escapeClosingTags, true);
+	// 静默中断分组（C1–C9，键名与默认值逐字照计划书 §6 表）
+	assert.equal(DEFAULT_SETTINGS.silentAbortAction, "notify"); // C1 默认 fail-safe：仅告警不自动续跑
+	assert.equal(DEFAULT_SETTINGS.enableSilentAbortWatch, true);
+	assert.equal(DEFAULT_SETTINGS.maxAutoResumePerSession, 3);
+	assert.equal(DEFAULT_SETTINGS.cooldownMs, 15000);
+	assert.equal(DEFAULT_SETTINGS.progressMinSteps, 3);
+	assert.deepEqual(DEFAULT_SETTINGS.errorNoRetryCodes, ["401", "403", "signed-out"]);
+	assert.equal(DEFAULT_SETTINGS.concludingTextMinLen, 200);
+	assert.equal(DEFAULT_SETTINGS.zombieSilentMs, 120000);
+	assert.equal(DEFAULT_SETTINGS.zombieAutoAction, false); // C9：U2 查明前强制 false
 	assert.ok(DEFAULT_SETTINGS.stall1Steps < DEFAULT_SETTINGS.stall2Steps && DEFAULT_SETTINGS.stall2Steps < DEFAULT_SETTINGS.stall3Steps);
 });
 
 test("SETTINGS_SCHEMA 覆盖全部键（GET 返回 schema 的内容保证）", () => {
-	assert.equal(SETTINGS_SCHEMA.length, 33);
+	assert.equal(SETTINGS_SCHEMA.length, 45);
 	for (const key of Object.keys(DEFAULT_SETTINGS)) {
 		assert.ok(SETTINGS_SCHEMA.some((c) => c.key === key), `schema 缺键 ${key}`);
 	}
@@ -105,6 +115,29 @@ test("coerceSetting：boolean 与 text", () => {
 	assert.equal(coerceSetting("enableInjection", false).value, false);
 	assert.equal(coerceSetting("enableInjection", undefined).value, false);
 	assert.equal(coerceSetting("summaryProvider", "  deepseek  ").value, "deepseek");
+});
+
+test("coerceSetting：静默中断分组（C1 四档枚举 + C6 数组键）", () => {
+	// C1：合法四档直通；非法回退 notify；缺省回退默认
+	assert.equal(coerceSetting("silentAbortAction", "followup").value, "followup");
+	assert.equal(coerceSetting("silentAbortAction", "goal-resume").value, "goal-resume");
+	const bad = coerceSetting("silentAbortAction", "turbo");
+	assert.equal(bad.value, "notify");
+	assert.ok(bad.warnings.length > 0);
+	assert.equal(coerceSetting("silentAbortAction", undefined).value, "notify");
+	// C6：数组原样过滤；字符串逗号拆分；空串回退默认；非法类型回退默认
+	assert.deepEqual(coerceSetting("errorNoRetryCodes", ["401", "x"]).value, ["401", "x"]);
+	assert.deepEqual(coerceSetting("errorNoRetryCodes", "401, 403,,signed-out").value, ["401", "403", "signed-out"]);
+	assert.deepEqual(coerceSetting("errorNoRetryCodes", "   ").value, DEFAULT_SETTINGS.errorNoRetryCodes);
+	assert.deepEqual(coerceSetting("errorNoRetryCodes", 42).value, DEFAULT_SETTINGS.errorNoRetryCodes);
+});
+
+test("validateSettings：C1 非法档与 C9 首开告警（不产生 error）", () => {
+	const badMode = validateSettings({ ...DEFAULT_SETTINGS, silentAbortAction: "turbo" });
+	assert.ok(badMode.warnings.some((w) => w.includes("silentAbortAction")));
+	const zombie = validateSettings({ ...DEFAULT_SETTINGS, zombieAutoAction: true });
+	assert.ok(zombie.warnings.some((w) => w.includes("zombieAutoAction")));
+	assert.equal(zombie.errors.length, 0); // P1 只告警不拦截（C9 暂不生效）
 });
 
 test("validateSettings：联动违规", () => {

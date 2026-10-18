@@ -44,7 +44,25 @@ reasoning（思考块）与正式 text 分开观察、走独立账本：当模�
 **7. 生命周期管理**
 worker 每分钟心跳；会话结束或最后事件后 10 分钟无新事件，自动清理会话状态与心跳；归档按保留期定期清扫。
 
-**8. 右侧栏干预时间线（timeline，v0.2.0 新增）**
+**8. 静默中断识别与原窗口主动续跑（P1 新增）**
+回合被步级上限（blocked）、输出长度上限（max-tokens）或运行时错误（error）打断、且未形成面向用户的结论时，watcher 检测该「静默中断」并按设置决定是否在**原窗口**主动发送续跑指令（`<silent-resume>` 模板：先汇报结论与断点，再继续推进）。
+
+C1 动作模式四档（`silentAbortAction`，互斥穷尽）：
+
+| 档位 | 行为 |
+| --- | --- |
+| `off` | 完全不检测（连 detected 事件都不落） |
+| `notify`（**默认**） | 检测 + 落事件 + timeline 干预通道 + agent-notify 告警，**不发消息**（fail-safe：不会自动向会话发送任何内容） |
+| `followup` | notify 全部动作 + 冷却到点后向原窗口 `agent.followup()` 发送续跑指令 |
+| `goal-resume` | 优先对 blocked/paused 的 goal 调 `goals.resume()`；无 goal 或 resume 抛错（含轮次用尽）回退 `followup`，仍不行回退 notify |
+
+切换路径：GUI 设置页「静默中断」分组 →「静默中断动作模式」下拉框，或直接编辑 `~/.dsh/storages/semantic-watcher/settings.json` 的 `silentAbortAction` 键；非法值运行期回退 `notify` 并记 warning。
+
+安全闸（防止自动续跑失控）：冷却 G2（回合结束后等 `cooldownMs`，默认 15 秒；窗内出现新 turn 或真人消息即放弃，真人永远优先 G3）；预算 G1（每会话自动续跑 ≤ `maxAutoResumePerSession` 默认 3 次，跨冷却不重置、真人接管才清零，用尽升级人工且为终态）；进展 G5（续跑新回合须达 `progressMinSteps` 默认 3 步或 ≥1 次工具调用，否则升级人工）；错误码排除 D4（`errorNoRetryCodes` 默认 401/403/signed-out，命中只告警不重试）；goal 让位 G4（goal active+armed 时不介入）；服务降级 G6（agents/goals/agent-notify 缺失或抛错一律只落事件与告警，绝不抛穿主流程）。
+
+关联设置键（C2–C9）：`enableSilentAbortWatch`（总开关）、`maxAutoResumePerSession`、`cooldownMs`、`progressMinSteps`、`errorNoRetryCodes`、`concludingTextMinLen`（仅统计记录）、`zombieSilentMs`/`zombieAutoAction`（B 类僵死，下一阶段实现，当前开启也不会产生任何动作）。事件以 `semantic-watcher/silent-abort/*` 落账本并在 timeline「干预」通道展示。
+
+**9. 右侧栏干预时间线（timeline，v0.2.0 新增）**
 DSH Web 右侧栏新增「语义监视」选项卡，把一次会话的治理痕迹合并成一条纵向时间线，统一归并五类来源并按时间倒序：
 
 | source | 含义 |
