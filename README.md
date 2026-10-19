@@ -86,7 +86,7 @@ DSH Web 右侧栏新增「语义监视」选项卡，把一次会话的治理痕
 ## 安装
 
 ```sh
-dsh plugin --profile <你的profile> add github:JiewiW/dsh-derive-watcher#v0.3.0
+dsh plugin --profile <你的profile> add github:JiewiW/dsh-derive-watcher#v0.3.1
 ```
 
 零第三方运行时依赖。账本默认落在 `~/.dsh/storages/semantic-watcher/`（设置项 `storagePath` 可改）。
