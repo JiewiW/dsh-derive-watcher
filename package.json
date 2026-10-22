@@ -1,7 +1,7 @@
 {
   "name": "dsh-derive-watcher",
-  "version": "0.3.1",
-  "description": "语义监视者（L3）：会话语义旅程账本、flash 总结、新颖性判定、里程碑折叠、上下文注入、三级语义停滞响应，以及右侧栏干预时间线（timeline）。v0.3.1 fixes events.js sink.emit reenter guard queuing (dsh-session entry.appending flag blocks silent-abort/detected events from landing in jsonl).",
+  "version": "0.3.2",
+  "description": "语义监视者（L3）：会话语义旅程账本、flash 总结、新颖性判定、里程碑折叠、上下文注入、三级语义停滞响应，以及右侧栏干预时间线（timeline）。v0.3.2 fixes npm pack files 配置（排除 replay/transcripts 与 replay/replay-ledger 的真实会话录音、test/ 目录）。",
   "keywords": ["dsh", "deepseek-harness", "dsh-plugin", "semantic-watcher", "journey"],
   "type": "module",
   "main": "lib/index.js",
@@ -13,11 +13,14 @@
   },
   "files": [
     "lib/",
-    "replay/",
-    "docs/",
-    "test/",
+    "README.md",
+    "LICENSE",
     "cordis.patch.yml",
-    "README.md"
+    "docs/events.md",
+    "replay/README.md",
+    "replay/replay.mjs",
+    "replay/expected-ranges.json",
+    "replay/p2-25/"
   ],
   "scripts": {
     "test": "node --test --test-concurrency=1 \"test/*.test.js\"",
@@ -39,5 +42,9 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/JiewiW/dsh-derive-watcher.git"
+  },
+  "homepage": "https://github.com/JiewiW/dsh-derive-watcher#readme",
+  "bugs": {
+    "url": "https://github.com/JiewiW/dsh-derive-watcher/issues"
   }
 }
