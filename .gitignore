@@ -1,11 +1,13 @@
 # 依赖
 node_modules/
+*.tgz
 
 # 运行产物（含真实会话数据，禁止入库）
 replay/transcripts/
 replay/replay-ledger/
 test-report.txt
 *.log
+*.jsonl
 
 # 本地工作目录（任务 Prompt 恢复件、临时取证脚本/备份，禁止入库）
 .dsh-work/
