@@ -15,7 +15,7 @@ export const INCIDENT_INTERCEPTIONS = [
 	{
 		id: "inc-1", turn: 1, step: 2, name: "pwsh",
 		args: {
-			command: 'Get-ChildItem -Path <WORKSPACE>, %USERPROFILE%\\.dsh -Recurse -Filter "*dsh-tap*" -ErrorAction SilentlyContinue | Select-Object FullName, Length, LastWriteTime | Format-Table -AutoSize'
+			command: 'Get-ChildItem -Path <WORKSPACE>, %USERPROFILE%\\.dsh -Recurse -Filter "*<PKG>*" -ErrorAction SilentlyContinue | Select-Object FullName, Length, LastWriteTime | Format-Table -AutoSize'
 		},
 		blockedCode: "g2a-same-target"
 	},
@@ -29,14 +29,14 @@ export const INCIDENT_INTERCEPTIONS = [
 	{
 		id: "inc-3", turn: 1, step: 5, name: "pwsh",
 		args: {
-			command: 'Get-ChildItem -Path %USERPROFILE%\\.dsh\\profiles\\web\\node_modules\\dsh-tap -Recurse -File; Get-Content ...\\dsh-tap\\package.json'
+			command: 'Get-ChildItem -Path %USERPROFILE%\\.dsh\\profiles\\<PROFILE>\\node_modules\\<PKG> -Recurse -File; Get-Content ...\\<PKG>\\package.json'
 		},
 		blockedCode: "g2b-consecutive-failure"
 	},
 	{
 		id: "inc-4", turn: 1, step: 10, name: "read",
 		args: {
-			file_path: "%USERPROFILE%\\.dsh\\profiles\\web\\node_modules\\dsh-tap\\providers\\trae\\gateway.js",
+			file_path: "%USERPROFILE%\\.dsh\\profiles\\<PROFILE>\\node_modules\\<PKG>\\providers\\<PROVIDER>\\<FILE>",
 			offset: 481, limit: 220
 		},
 		blockedCode: "g2a-same-target"
@@ -45,7 +45,7 @@ export const INCIDENT_INTERCEPTIONS = [
 		id: "inc-5", turn: 1, step: 19, name: "grep",
 		args: {
 			pattern: "const outcome|while|do |return 'fallback'|outcome ===|streamStarted.v = true|fnValue = ",
-			path: "%USERPROFILE%\\.dsh\\profiles\\web\\node_modules\\dsh-tap\\providers\\trae\\gateway.js"
+			path: "%USERPROFILE%\\.dsh\\profiles\\<PROFILE>\\node_modules\\<PKG>\\providers\\<PROVIDER>\\<FILE>"
 		},
 		blockedCode: "g2a-same-target"
 	},
@@ -53,7 +53,7 @@ export const INCIDENT_INTERCEPTIONS = [
 		id: "inc-6", turn: 1, step: 20, name: "grep",
 		args: {
 			pattern: "const outcome|fallbackUsed = true|fnValue = 'chat_v3'|while \\(|do \\{|streamStarted\\.v = true|return 'fallback'",
-			path: "%USERPROFILE%\\.dsh\\profiles\\web\\node_modules\\dsh-tap\\providers\\trae\\gateway.js"
+			path: "%USERPROFILE%\\.dsh\\profiles\\<PROFILE>\\node_modules\\<PKG>\\providers\\<PROVIDER>\\<FILE>"
 		},
 		blockedCode: "g2a-same-target"
 	}

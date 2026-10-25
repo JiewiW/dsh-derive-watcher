@@ -46,6 +46,16 @@ wall-clock stall-1 的另一载荷形态（observation 旁路路径，无 `stall
 
 `code` 取值：`level=2` → `"semantic-stall-2"`（L2 denyToolCategory，TTL 到期自动解除）；`level=3` → `"semantic-stall"`（不可重试、不走 G1，经 rejectStep 在本 turn 下一 pre-step 边界消费）；`level=1` → `null`（含 wall-clock 路径）。改进①：词法重复计入升级时（`enableLexicalStallCount=true`），词法来源的 code 为 `"lexical-stall-2"` / `"lexical-stall"`，与语义来源区分。
 
+#### 验证场景口径（真人消息复位，来源：内部修复计划第 4 节 M4）
+
+stall 计数**只在单回合内有效**：真人 user 消息到达时，停滞计数与级动作状态全部归零（`stallCount` / `consecutiveGap` / `actioned` / `lexicalCount` 等），这是设计内行为，非缺陷。
+
+因此：
+
+- stall-2 / stall-3 升级只允许在**单回合（两次真人消息之间）的多步 agent 自循环**内验证（典型场景：compress 风暴中连续多步产出重复结论）。
+- **禁止**使用「用户连发重复消息」场景验证 stall 升级——该场景下计数被真人消息持续复位，验证必然 FAIL。2026-10-15 V4 造场景三轮失败即属此因（根因 3），非被测代码缺陷。
+- 观测 stall 升级时应以单回合内 `step` 递增、`turn` 不变为有效场景判据。
+
 ### semantic-watcher/intervention（v0.2.0 新增）
 
 stall-2/3 升级时对 L2（step-governor）的干预调用**成功返回**后发出，用于把「干预是否真的被受理」沉淀进时间线。与 `stall` 一一对应但语义不同：`stall` 表示「升级到某级」，`intervention` 表示「该级请求 L2 动作后的受理结果」。只在成功分支发出；L2 调用失败/不可用仍发 `execution-unavailable`，**不发** intervention。
