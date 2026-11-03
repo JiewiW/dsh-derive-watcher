@@ -60,7 +60,7 @@ C1 动作模式四档（`silentAbortAction`，互斥穷尽）：
 
 安全闸（防止自动续跑失控）：冷却 G2（回合结束后等 `cooldownMs`，默认 15 秒；窗内出现新 turn 或真人消息即放弃，真人永远优先 G3）；预算 G1（每会话自动续跑 ≤ `maxAutoResumePerSession` 默认 3 次，跨冷却不重置、真人接管才清零，用尽升级人工且为终态）；进展 G5（续跑新回合须达 `progressMinSteps` 默认 3 步或 ≥1 次工具调用，否则升级人工）；错误码排除 D4（`errorNoRetryCodes` 默认 401/403/signed-out，命中只告警不重试）；goal 让位 G4（goal active+armed 时不介入）；服务降级 G6（agents/goals/agent-notify 缺失或抛错一律只落事件与告警，绝不抛穿主流程）。
 
-关联设置键（C2–C9）：`enableSilentAbortWatch`（总开关）、`maxAutoResumePerSession`、`cooldownMs`、`progressMinSteps`、`errorNoRetryCodes`、`concludingTextMinLen`（仅统计记录）、`zombieSilentMs`/`zombieAutoAction`（B 类僵死，下一阶段实现，当前开启也不会产生任何动作）。事件以 `semantic-watcher/silent-abort/*` 落账本并在 timeline「干预」通道展示。
+关联设置键（C2–C9）：`enableSilentAbortWatch`（总开关）、`maxAutoResumePerSession`、`cooldownMs`、`progressMinSteps`、`errorNoRetryCodes`、`concludingTextMinLen`（仅统计记录）、`zombieSilentMs`（B 类僵死判定静默毫秒，默认 120000；静默超过该时长判僵死，随后复用同一个「静默中断动作模式」处理）、`zombieAutoAction`（僵死「自动重建会话」总闸，尚未实现，当前开启不产生任何动作）。事件以 `semantic-watcher/silent-abort/*` 落账本并在 timeline「干预」通道展示。
 
 **9. 右侧栏干预时间线（timeline，v0.2.0 新增）**
 DSH Web 右侧栏新增「语义监视」选项卡，把一次会话的治理痕迹合并成一条纵向时间线，统一归并五类来源并按时间倒序：
