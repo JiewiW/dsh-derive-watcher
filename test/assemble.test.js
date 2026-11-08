@@ -126,7 +126,7 @@ test("设置 GET 返回 schema + settings + defaults + capabilities", async () =
 	assert.equal(res.body.ok, true);
 	assert.ok(Array.isArray(res.body.schema) && res.body.schema.length >= 18, "schema 覆盖全部设置键");
 	assert.equal(Object.keys(res.body.settings).length, Object.keys(DEFAULT_SETTINGS).length);
-	assert.equal(res.body.defaults.enableInjection, false, "defaults 是首发态");
+	assert.equal(res.body.defaults.enableInjection, true, "defaults 与运行时默认一致");
 	assert.equal(res.body.defaults.enableStall3Reject, false);
 	assert.equal(res.body.capabilities.llm, true, "mock llm 已注册");
 	assert.equal(res.body.capabilities.stepGovernor, false, "L2 未就绪");

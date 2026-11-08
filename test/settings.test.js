@@ -14,9 +14,9 @@ import {
 test("DEFAULT_SETTINGS：45 键全量与首发态（含小结模型/超时三键）", () => {
 	assert.equal(Object.keys(DEFAULT_SETTINGS).length, 45);
 	assert.equal(DEFAULT_SETTINGS.enableJourney, true);
-	assert.equal(DEFAULT_SETTINGS.enableInjection, false);
+	assert.equal(DEFAULT_SETTINGS.enableInjection, true);
 	assert.equal(DEFAULT_SETTINGS.enableStall3Reject, false);
-	assert.equal(DEFAULT_SETTINGS.enableStall2Deny, false); // 偏离计划书默认 true：首发 enableInjection=false 下 true 会触发联动校验错误（交付说明已记）
+	assert.equal(DEFAULT_SETTINGS.enableStall2Deny, true); // 首发态已改为默认 true（注入通道开启，联动成立）
 	assert.equal(DEFAULT_SETTINGS.maxConcurrency, 1);
 	assert.equal(DEFAULT_SETTINGS.injectionTokenBudget, 1200);
 	assert.equal(DEFAULT_SETTINGS.recentN, 8);
@@ -92,7 +92,7 @@ test("reasoning 四键：越界 clamp / 非法回退 / 布尔收敛", () => {
 test("validateSettings：reasoning stall 键不挂 enableInjection 联动（仅提示）", () => {
 	const r = validateSettings({
 		...DEFAULT_SETTINGS,
-		enableInjection: false,
+		enableInjection: false, enableStall2Deny: false, enableStall2SoftCut: false, enableStall3Reject: false,
 		enableJourney: true,
 		reasoningStallWatchSteps: 10,
 		reasoningStallWatchWindowSec: 900
@@ -113,7 +113,7 @@ test("coerceSetting：小数键 lexicalThreshold 不四舍五入（改进②）"
 test("coerceSetting：boolean 与 text", () => {
 	assert.equal(coerceSetting("enableInjection", "true").value, true);
 	assert.equal(coerceSetting("enableInjection", false).value, false);
-	assert.equal(coerceSetting("enableInjection", undefined).value, false);
+	assert.equal(coerceSetting("enableInjection", undefined).value, true);
 	assert.equal(coerceSetting("summaryProvider", "  deepseek  ").value, "deepseek");
 });
 
@@ -172,9 +172,11 @@ test("applyRuntimeSettings：合法更新 + clamp + noveltyMode 非法收敛", (
 	assert.equal(r5.settings.noveltyMode, "semantic-only"); // 改进③：纯语义模式合法
 });
 
-test("firstRunGuards：钉定 enableInjection=false / enableStall3Reject=false", () => {
+test("firstRunGuards：仅钉定 enableStall3Reject=false，注入与 stall-2 保持默认", () => {
 	const s = firstRunGuards({ ...DEFAULT_SETTINGS, enableInjection: true, enableStall3Reject: true });
-	assert.equal(s.enableInjection, false);
+	assert.equal(s.enableInjection, true);
+	assert.equal(s.enableStall2Deny, true);
+	assert.equal(s.enableStall2SoftCut, true);
 	assert.equal(s.enableStall3Reject, false);
 });
 
