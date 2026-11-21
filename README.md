@@ -31,7 +31,7 @@ DeepSeek Harness（DSH）插件。观察 agent 会话的语义进展：把每个
 ## 安装
 
 ```sh
-dsh plugin --profile <你的profile> add github:JiewiW/dsh-derive-watcher#v0.4.2
+dsh plugin --profile <你的profile> add github:JiewiW/dsh-derive-watcher#v0.4.3
 ```
 
 零第三方运行时依赖。账本默认落在 `~/.dsh/storages/semantic-watcher/`（设置项 `storagePath` 可改）。
