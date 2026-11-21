@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
 	DEFAULT_SETTINGS, SETTINGS_SCHEMA, coerceSetting, validateSettings,
-	applyRuntimeSettings, firstRunGuards, makeSettingsStore
+	applyRuntimeSettings, applyRuntimeSettingsLenient, firstRunGuards, makeSettingsStore
 } from "../lib/settings.js";
 
 test("DEFAULT_SETTINGS：44 键全量与首发态（含小结模型/超时三键）", () => {
@@ -175,6 +175,58 @@ test("firstRunGuards：仅钉定 enableStall3Reject=false，注入与 stall-2 �
 	assert.equal(s.enableStall2Deny, true);
 	assert.equal(s.enableStall2SoftCut, true);
 	assert.equal(s.enableStall3Reject, false);
+});
+
+// ── 逐项降级（加载路径）────────────────────────────────────────────────
+// 回归背景：此前联动违规会让整份配置回退默认值，连 storagePath 一起丢，
+// 导致账本路径静默漂移到默认目录。降级必须只动违规的那一项。
+
+test("applyRuntimeSettingsLenient：联动违规只降级从属项，storagePath 等无关配置必须保住", () => {
+	const r = applyRuntimeSettingsLenient(DEFAULT_SETTINGS, {
+		...DEFAULT_SETTINGS, enableInjection: false, enableJourney: true, storagePath: "/tmp/my-ledger"
+	});
+	assert.equal(r.errors.length, 0, "加载路径不应残留 error");
+	assert.equal(r.settings.storagePath, "/tmp/my-ledger", "storagePath 不得被连带清空");
+	assert.equal(r.settings.enableInjection, false, "保留用户显式表达的 false");
+	assert.equal(r.settings.enableStall2Deny, false, "仅降级依赖注入的从属项");
+	assert.equal(r.repairs.length, 1);
+	assert.ok(r.warnings.some((w) => w.includes("配置降级")), "降级必须留告警");
+});
+
+test("applyRuntimeSettingsLenient：多跳联动逐级收敛，不打开用户已关的上游", () => {
+	const r = applyRuntimeSettingsLenient(DEFAULT_SETTINGS, {
+		...DEFAULT_SETTINGS,
+		enableJourney: false, enableInjection: true,
+		enableStall2Deny: true, enableStall3Reject: true, storagePath: "/keep"
+	});
+	assert.equal(r.errors.length, 0);
+	assert.equal(r.settings.enableJourney, false, "上游保持用户设定");
+	assert.equal(r.settings.enableInjection, false, "下游逐级关闭而非打开上游");
+	assert.equal(r.settings.enableStall2Deny, false);
+	assert.equal(r.settings.enableStall3Reject, false);
+	assert.equal(r.settings.storagePath, "/keep");
+});
+
+test("applyRuntimeSettingsLenient：阈值倒挂回退三键，其余配置保留", () => {
+	const r = applyRuntimeSettingsLenient(DEFAULT_SETTINGS, {
+		...DEFAULT_SETTINGS, stall1Steps: 6, stall2Steps: 3, stall3Steps: 10, storagePath: "/keep2"
+	});
+	assert.equal(r.errors.length, 0);
+	assert.deepEqual([r.settings.stall1Steps, r.settings.stall2Steps, r.settings.stall3Steps], [3, 6, 10]);
+	assert.equal(r.settings.storagePath, "/keep2");
+});
+
+test("applyRuntimeSettingsLenient：合法配置不产生 repairs", () => {
+	const r = applyRuntimeSettingsLenient(DEFAULT_SETTINGS, { ...DEFAULT_SETTINGS, storagePath: "/ok" });
+	assert.equal(r.errors.length, 0);
+	assert.equal(r.repairs.length, 0);
+	assert.equal(r.settings.storagePath, "/ok");
+});
+
+test("applyRuntimeSettings（严格）：POST 保存路径仍整份拒绝，不做静默降级", () => {
+	const r = applyRuntimeSettings(DEFAULT_SETTINGS, { ...DEFAULT_SETTINGS, enableInjection: false, storagePath: "/lost" });
+	assert.ok(r.errors.length > 0, "显式保存必须报错而不是悄悄改配置");
+	assert.equal(r.settings.storagePath, "", "严格版维持原语义：整体保持 current");
 });
 
 test("makeSettingsStore：保存/读取往返/损坏回退 null", () => {

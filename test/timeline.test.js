@@ -24,9 +24,9 @@ const originalSettings = hadSettings ? readFileSync(SETTINGS_PATH, "utf8") : nul
 const tempRoot = mkdtempSync(join(tmpdir(), "dsw-timeline-"));
 mkdirSync(join(tempRoot, "journey"), { recursive: true });
 mkdirSync(join(tempRoot, "observation"), { recursive: true });
-// 注意：enableStall2Deny/SoftCut 默认 true 且要求 enableInjection=true（联动校验）。
-// 关闭注入时必须同时关掉这两个联动项，否则整份设置会被 applyRuntimeSettings 拒绝并回退默认，
-// storagePath 随之丢失、路由去读真实账本目录（表现为 404 / 读到生产数据）。
+// 显式关闭 enableStall2Deny/SoftCut：二者默认 true 且要求 enableInjection=true（联动校验）。
+// 加载路径已改为「逐项降级」不再整份回退，但显式写全可让本用例的前置状态不依赖降级逻辑；
+// 同时保证 POST 保存（严格校验）时这份配置本身也是合法的。
 writeFileSync(join(SETTINGS_DIR, SETTINGS_FILE ?? "settings.json"), JSON.stringify({
 	...DEFAULT_SETTINGS,
 	enableInjection: false,
