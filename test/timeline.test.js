@@ -24,8 +24,16 @@ const originalSettings = hadSettings ? readFileSync(SETTINGS_PATH, "utf8") : nul
 const tempRoot = mkdtempSync(join(tmpdir(), "dsw-timeline-"));
 mkdirSync(join(tempRoot, "journey"), { recursive: true });
 mkdirSync(join(tempRoot, "observation"), { recursive: true });
+// 注意：enableStall2Deny/SoftCut 默认 true 且要求 enableInjection=true（联动校验）。
+// 关闭注入时必须同时关掉这两个联动项，否则整份设置会被 applyRuntimeSettings 拒绝并回退默认，
+// storagePath 随之丢失、路由去读真实账本目录（表现为 404 / 读到生产数据）。
 writeFileSync(join(SETTINGS_DIR, SETTINGS_FILE ?? "settings.json"), JSON.stringify({
-	...DEFAULT_SETTINGS, enableInjection: false, enableJourney: true, storagePath: tempRoot
+	...DEFAULT_SETTINGS,
+	enableInjection: false,
+	enableStall2Deny: false,
+	enableStall2SoftCut: false,
+	enableJourney: true,
+	storagePath: tempRoot
 }, null, 2));
 
 const iso = (sec) => `2025-10-09T00:00:${String(sec).padStart(2, "0")}.000Z`;

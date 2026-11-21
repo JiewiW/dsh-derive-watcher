@@ -15,7 +15,10 @@ function harness(overrides = {}) {
 	const controller = createStallController({
 		emit: (n, p) => events.push({ n, p }),
 		log: () => {},
-		getSettings: () => ({ ...DEFAULT_SETTINGS, ...(overrides.settings ?? {}) }),
+		// 本文件只测 L2 denyToolCategory 通道；enableStall2SoftCut 默认已改为 true，
+		// 不显式关掉会额外走 cot-anchor 软切分支（未注入服务 → 多一条 execution-unavailable），
+		// 污染「正常受理不降级」类断言。软切通道由 stall-softcut.test.js 专测。
+		getSettings: () => ({ ...DEFAULT_SETTINGS, enableStall2SoftCut: false, ...(overrides.settings ?? {}) }),
 		getL2: overrides.getL2 ?? null,
 		writeHandoff: overrides.writeHandoff ?? null
 	});
@@ -113,6 +116,10 @@ test("L2 未就绪（getL2=null）→ level=2 fail-open 降级仅注入", async 
 test("语义 duplicate 达 t3 → level=3 + writeHandoff + handoff-written；enableStall3Reject 默认 false 不调 rejectStep", async () => {
 	const handoffCalls = [];
 	const { events, controller } = harness({
+		// 升到 level 3 途中会经过 level 2，而 level 2 的两个通道默认都已开启
+		// （enableStall2Deny / enableStall2SoftCut = true）。本用例既未注入 L2 也未注入 cot-anchor，
+		// 两处都会落一条 execution-unavailable，与「默认只告警、无降级」的断言冲突，故一并关掉。
+		settings: { enableStall2Deny: false, enableStall2SoftCut: false },
 		writeHandoff: async (sid, meta) => { handoffCalls.push({ sid, ...meta }); return { path: "h.md", seedPath: "s.json" }; }
 	});
 	const r = controller.onEntries("s1", [
@@ -305,7 +312,7 @@ test("intervention：deny 受理 → semantic-watcher/intervention 经 session.a
 	const controller = createStallController({
 		emit: (name, payload) => sink.emit(session, name, payload),
 		log: () => {},
-		getSettings: () => ({ ...DEFAULT_SETTINGS, enableStall2Deny: true }),
+		getSettings: () => ({ ...DEFAULT_SETTINGS, enableStall2Deny: true, enableStall2SoftCut: false }),
 		getL2: () => ({ denyToolCategory: async () => ({ accepted: true, expiresAtStep: 99 }) })
 	});
 	controller.onEntries("s1", [semDup(1), semDup(2), semDup(3)]);
@@ -416,7 +423,7 @@ test("intervention：emit 自身抛错 → fail-soft 只记一行 log，不影�
 			events.push({ n, p });
 		},
 		log: (line) => lines.push(line),
-		getSettings: () => ({ ...DEFAULT_SETTINGS, enableStall2Deny: true }),
+		getSettings: () => ({ ...DEFAULT_SETTINGS, enableStall2Deny: true, enableStall2SoftCut: false }),
 		getL2: () => ({ denyToolCategory: async () => ({ accepted: true, expiresAtStep: 50 }) })
 	});
 	controller.onEntries("s1", [semDup(1), semDup(2), semDup(3)]);

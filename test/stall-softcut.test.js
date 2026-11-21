@@ -28,7 +28,10 @@ function harness(overrides = {}) {
 	const controller = createStallController({
 		emit: (n, p) => events.push({ n, p }),
 		log: (line) => logs.push(line),
-		getSettings: () => ({ ...DEFAULT_SETTINGS, ...(overrides.settings ?? {}) }),
+		// 本文件只测 cot-anchor 软切通道；enableStall2Deny 默认已改为 true，
+		// 不显式关掉会额外走 L2 denyToolCategory 分支（未注入服务 → 多一条 execution-unavailable），
+		// 污染「受理成功不降级」类断言。deny 通道由 stall.test.js 专测。
+		getSettings: () => ({ ...DEFAULT_SETTINGS, enableStall2Deny: false, ...(overrides.settings ?? {}) }),
 		getL2: overrides.getL2 ?? null,
 		getCotAnchor: overrides.getCotAnchor ?? null,
 		writeHandoff: overrides.writeHandoff ?? null

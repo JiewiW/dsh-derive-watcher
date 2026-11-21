@@ -292,9 +292,13 @@ test("agent/pre-step：空账本会话 → 透传不注入（无内容可注入�
 });
 
 test("P2-21②：enableInjection=false 封住投递通道（含警示，不注入任何插件文本）", async () => {
-	// 先用 POST 切到 enableInjection=false（settings 经内存 store 生效）
+	// 先用 POST 切到 enableInjection=false（settings 经内存 store 生效）。
+	// enableStall2Deny/SoftCut 默认 true 且要求 enableInjection=true（联动校验），
+	// 不同时关掉会被 400 拒绝，本用例的前置状态就不成立。
 	let res = fakeRes();
-	await ctx.routes[0].handler(postReq({ settings: { enableInjection: false } }), res);
+	await ctx.routes[0].handler(postReq({
+		settings: { enableInjection: false, enableStall2Deny: false, enableStall2SoftCut: false }
+	}), res);
 	assert.equal(res.status, 200);
 	// sid 已有账本 entry，正常开启注入时会注入；关闭后应原样透传
 	const [onPreStep] = ctx.handlers.get("agent/pre-step");
@@ -334,6 +338,8 @@ test("P1-13：会话首事件触发一次性重启补扫（按观察水位，幂
 	const [onEvent2] = ctx2.handlers.get("session/event");
 	// 触发首个事件（turn/end 也计入活跃度）→ 应触发一次性补扫
 	onEvent2({ id: sid, append: () => true }, { type: "turn/end", data: { turn: 1, reason: "done" } });
+	// 补扫是异步的（内部 await query.listEvents）：必须等它落盘后再断言，否则读到空账本。
+	await waitFor(() => store.readObservations(sid).length > 0);
 	// 观察账本补写 step2/3（step1 被水位跳过；step4 空文本不入观察）；结论通道 step2/3/4 为 observation
 	const obs = store.readObservations(sid);
 	const obsSteps = obs.map((o) => o.step).sort((a, b) => a - b);
@@ -341,6 +347,7 @@ test("P1-13：会话首事件触发一次性重启补扫（按观察水位，幂
 	// 断言补扫只生效一次：再次触发事件不重复补写（水位已推进 → readObservations 不再增长）
 	const before2 = obs.length;
 	onEvent2({ id: sid, append: () => true }, { type: "turn/end", data: { turn: 2, reason: "done" } });
+	await settle();
 	assert.equal(store.readObservations(sid).length, before2, "补扫幂等：二次触发不重复");
 	dispose2();
 });
